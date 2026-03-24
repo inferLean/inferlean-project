@@ -1,0 +1,7 @@
+collector-report.json
+.DS_Store
+bin
+reports
+dist
+.venv
+.dev

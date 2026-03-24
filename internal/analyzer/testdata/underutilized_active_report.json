@@ -1,0 +1,78 @@
+{
+  "schema_version": "v2",
+  "generated_at": "2026-03-21T14:20:00Z",
+  "tool_name": "InferLean",
+  "tool_version": "dev",
+  "os_information": {
+    "os_type": "linux",
+    "architecture": "amd64",
+    "os_version": "6.8.0",
+    "distribution": "Ubuntu",
+    "disk_size_bytes": 1000,
+    "memory_size_bytes": 1000,
+    "cpu": {
+      "model": "EPYC",
+      "physical_cores": 32,
+      "logical_cores": 64
+    },
+    "available_disk_bytes": 900,
+    "available_memory_bytes": 800,
+    "average_cpu_utilization_pct": 22
+  },
+  "gpu_information": {
+    "gpu_model": "H100",
+    "company": "NVIDIA",
+    "vram_size_bytes": 85899345920,
+    "utilization_pct": 21
+  },
+  "vllm_information": {
+    "vllm_version": "0.18.0",
+    "configuration_location": "/etc/vllm/config.json",
+    "installation_type": "host"
+  },
+  "collected_metrics": [
+    {
+      "time_label": "2026-03-21T14:10:00Z",
+      "metrics": {
+        "gpu_utilization_pct": 18,
+        "vllm:num_requests_running": 1,
+        "vllm:num_requests_waiting": 0,
+        "vllm:request_success_total": 100,
+        "vllm:generation_tokens_total": 10000,
+        "vllm:prompt_tokens_total": 5000,
+        "vllm:time_to_first_token_seconds_sum": 50,
+        "vllm:time_to_first_token_seconds_count": 100,
+        "vllm:request_queue_time_seconds_sum": 5,
+        "vllm:request_queue_time_seconds_count": 100,
+        "vllm:request_prefill_time_seconds_sum": 20,
+        "vllm:request_prefill_time_seconds_count": 100,
+        "vllm:request_decode_time_seconds_sum": 30,
+        "vllm:request_decode_time_seconds_count": 100,
+        "vllm:kv_cache_usage_perc": 48,
+        "vllm:num_preemptions_total": 0
+      }
+    },
+    {
+      "time_label": "2026-03-21T14:11:00Z",
+      "metrics": {
+        "gpu_utilization_pct": 22,
+        "vllm:num_requests_running": 1.2,
+        "vllm:num_requests_waiting": 0,
+        "vllm:request_success_total": 140,
+        "vllm:generation_tokens_total": 16000,
+        "vllm:prompt_tokens_total": 8000,
+        "vllm:time_to_first_token_seconds_sum": 72,
+        "vllm:time_to_first_token_seconds_count": 140,
+        "vllm:request_queue_time_seconds_sum": 7,
+        "vllm:request_queue_time_seconds_count": 140,
+        "vllm:request_prefill_time_seconds_sum": 28,
+        "vllm:request_prefill_time_seconds_count": 140,
+        "vllm:request_decode_time_seconds_sum": 44,
+        "vllm:request_decode_time_seconds_count": 140,
+        "vllm:kv_cache_usage_perc": 50,
+        "vllm:num_preemptions_total": 0
+      }
+    }
+  ],
+  "current_vllm_configurations": {}
+}

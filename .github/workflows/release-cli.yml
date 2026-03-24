@@ -1,0 +1,165 @@
+name: Release CLI
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-cli-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release_cli:
+    name: Build and Release CLI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Normalize legacy numeric tag prefix
+        if: github.ref == 'refs/heads/main'
+        run: |
+          legacy_tag="$(git tag --list | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)"
+
+          if [ -z "${legacy_tag}" ]; then
+            echo "No legacy numeric tags found."
+            exit 0
+          fi
+
+          prefixed_tag="v${legacy_tag}"
+          if git rev-parse -q --verify "refs/tags/${prefixed_tag}" >/dev/null; then
+            echo "Prefixed tag ${prefixed_tag} already exists."
+            exit 0
+          fi
+
+          target_sha="$(git rev-list -n 1 "${legacy_tag}")"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${prefixed_tag}" "${target_sha}"
+          git push origin "${prefixed_tag}"
+
+      - name: Compute semantic version
+        id: semantic_version
+        uses: paulhatch/semantic-version@v6.0.1
+        with:
+          tag_prefix: "v"
+          search_commit_body: true
+
+      - name: Compose release tag
+        id: computed_tag
+        run: echo "value=${{ steps.semantic_version.outputs.version_tag }}" >> "$GITHUB_OUTPUT"
+
+      - name: Show semantic version outputs
+        run: |
+          echo "version=${{ steps.semantic_version.outputs.version }}"
+          echo "version_tag=${{ steps.semantic_version.outputs.version_tag }}"
+          echo "computed_tag=${{ steps.computed_tag.outputs.value }}"
+          echo "version_type=${{ steps.semantic_version.outputs.version_type }}"
+          echo "is_tagged=${{ steps.semantic_version.outputs.is_tagged }}"
+
+      - name: Create semantic version tag
+        if: github.ref == 'refs/heads/main' && steps.semantic_version.outputs.is_tagged != 'true'
+        run: |
+          tag="${{ steps.computed_tag.outputs.value }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --tags origin "refs/tags/${tag}" | grep -q "refs/tags/${tag}$"; then
+            echo "Tag ${tag} already exists on origin."
+            exit 0
+          fi
+
+          git tag "${tag}"
+
+          if git push origin "refs/tags/${tag}"; then
+            echo "Pushed tag ${tag}."
+          elif git ls-remote --tags origin "refs/tags/${tag}" | grep -q "refs/tags/${tag}$"; then
+            echo "Tag ${tag} was created by another workflow run."
+          else
+            echo "Failed to push tag ${tag}."
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build release archives
+        run: |
+          set -eu
+
+          app_name="inferlean"
+          cmd_path="./cmd/infer-lean"
+          tag="${{ steps.computed_tag.outputs.value }}"
+          version="${tag#v}"
+
+          rm -rf dist
+          mkdir -p dist
+
+          while read -r goos goarch archive_ext; do
+            [ -n "${goos}" ] || continue
+            [ "${goos#\#}" = "${goos}" ] || continue
+
+            target_dir="dist/${app_name}_${version}_${goos}_${goarch}"
+            bin_name="${app_name}"
+            if [ "${goos}" = "windows" ]; then
+              bin_name="${bin_name}.exe"
+            fi
+
+            mkdir -p "${target_dir}"
+            CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
+              go build -trimpath -ldflags "-s -w" -o "${target_dir}/${bin_name}" "${cmd_path}"
+
+            cp README.md "${target_dir}/README.md"
+            cp LICENSE.md "${target_dir}/LICENSE.md"
+
+            archive_name="${app_name}_${version}_${goos}_${goarch}.${archive_ext}"
+            case "${archive_ext}" in
+              tar.gz)
+                tar -C dist -czf "dist/${archive_name}" "$(basename "${target_dir}")"
+                ;;
+              zip)
+                (cd dist && zip -rq "${archive_name}" "$(basename "${target_dir}")")
+                ;;
+              *)
+                echo "unsupported archive extension: ${archive_ext}" >&2
+                exit 1
+                ;;
+            esac
+
+            rm -rf "${target_dir}"
+          done <<'TARGETS'
+          linux amd64 tar.gz
+          linux arm64 tar.gz
+          darwin amd64 tar.gz
+          darwin arm64 tar.gz
+          windows amd64 zip
+          windows arm64 zip
+          TARGETS
+
+          (cd dist && sha256sum inferlean_* > checksums.txt)
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.computed_tag.outputs.value }}
+          name: InferLean CLI ${{ steps.computed_tag.outputs.value }}
+          generate_release_notes: true
+          overwrite_files: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
