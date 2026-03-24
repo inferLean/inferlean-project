@@ -4,7 +4,7 @@
 
 InferLean is a CLI for inference performance analysis. It collects runtime signals from your serving stack, uploads a job to the InferLean dashboard, and returns a direct link to analysis and recommendations you can act on immediately.
 
-[Website](https://inferlean.com)
+[InferLean](https://inferlean.com)
 
 ## Why InferLean
 
