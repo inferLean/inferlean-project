@@ -10,6 +10,20 @@ import (
 	"github.com/inferLean/inferlean-project/internal/model"
 )
 
+const (
+	computeLoadSourceDCGMSMActive      = "dcgm_sm_active"
+	computeLoadSourceDCGMSMOccupancy   = "dcgm_sm_occupancy"
+	computeLoadSourceDCGMGREngine      = "dcgm_gr_engine_active"
+	computeLoadSourceDCGMPipeActiveMax = "dcgm_pipe_active_max"
+	computeLoadSourceGPUUtilProxy      = "gpu_utilization_proxy"
+
+	memoryBandwidthLoadSourceDCGMDRAMActive  = "dcgm_dram_active"
+	memoryBandwidthLoadSourceDCGMMemCopyUtil = "dcgm_mem_copy_util"
+
+	saturationSourceMeasured    = "measured"
+	saturationSourceApproximate = "approximate"
+)
+
 func ExtractFeatures(report *model.AnalysisReport) FeatureSet {
 	features := FeatureSet{
 		Metrics: map[string]MetricSummary{},
@@ -60,10 +74,13 @@ func ExtractFeatures(report *model.AnalysisReport) FeatureSet {
 	}
 	if loadPct, ok := metricAveragePct(features.Metrics, "DCGM_FI_PROF_SM_ACTIVE"); ok {
 		features.AvgGPUComputeLoadPct = loadPct
-		features.ComputeLoadSource = "dcgm_sm_active"
+		features.ComputeLoadSource = computeLoadSourceDCGMSMActive
+	} else if loadPct, ok := metricAveragePct(features.Metrics, "DCGM_FI_PROF_SM_OCCUPANCY"); ok {
+		features.AvgGPUComputeLoadPct = loadPct
+		features.ComputeLoadSource = computeLoadSourceDCGMSMOccupancy
 	} else if loadPct, ok := metricAveragePct(features.Metrics, "DCGM_FI_PROF_GR_ENGINE_ACTIVE"); ok {
 		features.AvgGPUComputeLoadPct = loadPct
-		features.ComputeLoadSource = "dcgm_gr_engine_active"
+		features.ComputeLoadSource = computeLoadSourceDCGMGREngine
 	} else if loadPct, ok := maxMetricAveragePct(
 		features.Metrics,
 		"DCGM_FI_PROF_PIPE_TENSOR_ACTIVE",
@@ -72,16 +89,18 @@ func ExtractFeatures(report *model.AnalysisReport) FeatureSet {
 		"DCGM_FI_PROF_PIPE_FP64_ACTIVE",
 	); ok {
 		features.AvgGPUComputeLoadPct = loadPct
-		features.ComputeLoadSource = "dcgm_pipe_active_max"
+		features.ComputeLoadSource = computeLoadSourceDCGMPipeActiveMax
 	} else {
 		features.AvgGPUComputeLoadPct = features.AvgGPUUtilizationPct
-		features.ComputeLoadSource = "gpu_utilization_proxy"
+		features.ComputeLoadSource = computeLoadSourceGPUUtilProxy
 	}
 	if loadPct, ok := metricAveragePct(features.Metrics, "DCGM_FI_PROF_DRAM_ACTIVE"); ok {
 		features.AvgGPUMemoryBandwidthLoadPct = loadPct
+		features.MemoryBandwidthLoadSource = memoryBandwidthLoadSourceDCGMDRAMActive
 		features.MemoryBandwidthLoadAvailable = true
 	} else if loadPct, ok := metricAveragePct(features.Metrics, "DCGM_FI_DEV_MEM_COPY_UTIL"); ok {
 		features.AvgGPUMemoryBandwidthLoadPct = loadPct
+		features.MemoryBandwidthLoadSource = memoryBandwidthLoadSourceDCGMMemCopyUtil
 		features.MemoryBandwidthLoadAvailable = true
 	}
 	if loadPct, ok := metricAveragePct(features.Metrics, "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE"); ok {
@@ -355,6 +374,7 @@ func featureSummaryFromSet(features FeatureSet) model.FeatureSummary {
 		AvgGPUComputeLoadPct:           features.AvgGPUComputeLoadPct,
 		ComputeLoadSource:              features.ComputeLoadSource,
 		AvgGPUMemoryBandwidthLoadPct:   features.AvgGPUMemoryBandwidthLoadPct,
+		MemoryBandwidthLoadSource:      features.MemoryBandwidthLoadSource,
 		MemoryBandwidthLoadAvailable:   features.MemoryBandwidthLoadAvailable,
 		AvgGPUTensorLoadPct:            features.AvgGPUTensorLoadPct,
 		TensorLoadAvailable:            features.TensorLoadAvailable,
@@ -411,6 +431,7 @@ func featureSetFromSummary(summary model.FeatureSummary) FeatureSet {
 		AvgGPUComputeLoadPct:           summary.AvgGPUComputeLoadPct,
 		ComputeLoadSource:              summary.ComputeLoadSource,
 		AvgGPUMemoryBandwidthLoadPct:   summary.AvgGPUMemoryBandwidthLoadPct,
+		MemoryBandwidthLoadSource:      summary.MemoryBandwidthLoadSource,
 		MemoryBandwidthLoadAvailable:   summary.MemoryBandwidthLoadAvailable,
 		AvgGPUTensorLoadPct:            summary.AvgGPUTensorLoadPct,
 		TensorLoadAvailable:            summary.TensorLoadAvailable,
@@ -454,23 +475,32 @@ func featureSetFromSummary(summary model.FeatureSummary) FeatureSet {
 
 func hasMeasuredComputeLoad(features FeatureSet) bool {
 	switch strings.TrimSpace(features.ComputeLoadSource) {
-	case "dcgm_sm_active", "dcgm_gr_engine_active", "dcgm_pipe_active_max":
+	case computeLoadSourceDCGMSMActive, computeLoadSourceDCGMSMOccupancy, computeLoadSourceDCGMGREngine, computeLoadSourceDCGMPipeActiveMax:
 		return true
 	default:
 		return false
 	}
 }
 
+func hasMeasuredMemoryBandwidthLoad(features FeatureSet) bool {
+	return strings.TrimSpace(features.MemoryBandwidthLoadSource) == memoryBandwidthLoadSourceDCGMDRAMActive
+}
+
+func hasApproximateSaturationSignals(features FeatureSet) bool {
+	return strings.TrimSpace(features.ComputeLoadSource) == computeLoadSourceGPUUtilProxy ||
+		strings.TrimSpace(features.MemoryBandwidthLoadSource) == memoryBandwidthLoadSourceDCGMMemCopyUtil
+}
+
 func hasRealSaturationMetrics(features FeatureSet) bool {
-	return hasMeasuredComputeLoad(features) || features.MemoryBandwidthLoadAvailable || features.TensorLoadAvailable
+	return hasMeasuredComputeLoad(features) || hasMeasuredMemoryBandwidthLoad(features) || features.TensorLoadAvailable
 }
 
 func saturationSource(features FeatureSet) string {
 	if hasRealSaturationMetrics(features) {
-		return "measured"
+		return saturationSourceMeasured
 	}
-	if strings.TrimSpace(features.ComputeLoadSource) == "gpu_utilization_proxy" {
-		return "gpu_utilization_proxy"
+	if hasApproximateSaturationSignals(features) {
+		return saturationSourceApproximate
 	}
 	return ""
 }

@@ -266,7 +266,7 @@ func TestNormalizeReportWarnsWhenSaturationUsesUtilizationProxy(t *testing.T) {
 	if normalized.CurrentLoadSummary == nil {
 		t.Fatalf("expected current load summary")
 	}
-	if normalized.CurrentLoadSummary.SaturationSource != "gpu_utilization_proxy" {
+	if normalized.CurrentLoadSummary.SaturationSource != "approximate" {
 		t.Fatalf("expected proxy saturation source, got %+v", normalized.CurrentLoadSummary)
 	}
 	if normalized.CurrentLoadSummary.RealSaturationMetricsAvailable {
@@ -278,7 +278,7 @@ func TestNormalizeReportWarnsWhenSaturationUsesUtilizationProxy(t *testing.T) {
 	if normalized.ServiceSummary.EstimatedUpperRequestRateRPS != nil {
 		t.Fatalf("expected headroom estimate to be suppressed for proxy saturation, got %+v", normalized.ServiceSummary)
 	}
-	if !containsAll(strings.Join(normalized.Warnings, "\n"), "Real GPU saturation metrics unavailable", "GPU utilization as a proxy") {
+	if !containsAll(strings.Join(normalized.Warnings, "\n"), "Measured GPU load counters were not fully available", "approximate GPU activity/load") {
 		t.Fatalf("expected proxy saturation warning, got %+v", normalized.Warnings)
 	}
 }
@@ -333,6 +333,84 @@ func TestNormalizeReportUsesMeasuredPipeActivityWhenSMCountersMissing(t *testing
 	}
 	if containsAll(strings.Join(normalized.Warnings, "\n"), "GPU utilization as a proxy") {
 		t.Fatalf("did not expect proxy warning, got %+v", normalized.Warnings)
+	}
+}
+
+func TestNormalizeReportUsesMeasuredSMOccupancyWhenSMActiveMissing(t *testing.T) {
+	report := syntheticReport(12, map[string]float64{
+		"DCGM_FI_PROF_SM_OCCUPANCY":              58,
+		"vllm:num_requests_running":              2,
+		"vllm:request_success_total":             80,
+		"vllm:generation_tokens_total":           5000,
+		"vllm:prompt_tokens_total":               2000,
+		"vllm:time_to_first_token_seconds_sum":   10,
+		"vllm:time_to_first_token_seconds_count": 80,
+		"vllm:request_queue_time_seconds_sum":    2,
+		"vllm:request_queue_time_seconds_count":  80,
+	}, map[string]float64{
+		"DCGM_FI_PROF_SM_OCCUPANCY":              61,
+		"vllm:num_requests_running":              2.2,
+		"vllm:request_success_total":             120,
+		"vllm:generation_tokens_total":           7600,
+		"vllm:prompt_tokens_total":               3200,
+		"vllm:time_to_first_token_seconds_sum":   14,
+		"vllm:time_to_first_token_seconds_count": 120,
+		"vllm:request_queue_time_seconds_sum":    3,
+		"vllm:request_queue_time_seconds_count":  120,
+	})
+
+	normalized := NormalizeReport(report, BalancedIntent)
+	if normalized.CurrentLoadSummary == nil {
+		t.Fatalf("expected current load summary")
+	}
+	if normalized.CurrentLoadSummary.ComputeLoadSource != "dcgm_sm_occupancy" {
+		t.Fatalf("expected SM occupancy compute source, got %+v", normalized.CurrentLoadSummary)
+	}
+	if normalized.CurrentLoadSummary.SaturationSource != "measured" {
+		t.Fatalf("expected measured saturation source, got %+v", normalized.CurrentLoadSummary)
+	}
+	if normalized.CurrentLoadSummary.RealSaturationMetricsAvailable != true {
+		t.Fatalf("expected measured saturation metrics to be available, got %+v", normalized.CurrentLoadSummary)
+	}
+}
+
+func TestNormalizeReportTreatsMemCopyUtilAsApproximateBandwidth(t *testing.T) {
+	report := syntheticReport(10, map[string]float64{
+		"gpu_utilization_pct":                    52,
+		"DCGM_FI_DEV_MEM_COPY_UTIL":              41,
+		"vllm:num_requests_running":              2,
+		"vllm:request_success_total":             80,
+		"vllm:generation_tokens_total":           5000,
+		"vllm:prompt_tokens_total":               2000,
+		"vllm:time_to_first_token_seconds_sum":   10,
+		"vllm:time_to_first_token_seconds_count": 80,
+		"vllm:request_queue_time_seconds_sum":    2,
+		"vllm:request_queue_time_seconds_count":  80,
+	}, map[string]float64{
+		"gpu_utilization_pct":                    57,
+		"DCGM_FI_DEV_MEM_COPY_UTIL":              46,
+		"vllm:num_requests_running":              2.2,
+		"vllm:request_success_total":             120,
+		"vllm:generation_tokens_total":           7600,
+		"vllm:prompt_tokens_total":               3200,
+		"vllm:time_to_first_token_seconds_sum":   14,
+		"vllm:time_to_first_token_seconds_count": 120,
+		"vllm:request_queue_time_seconds_sum":    3,
+		"vllm:request_queue_time_seconds_count":  120,
+	})
+
+	normalized := NormalizeReport(report, BalancedIntent)
+	if normalized.CurrentLoadSummary == nil {
+		t.Fatalf("expected current load summary")
+	}
+	if normalized.CurrentLoadSummary.MemoryBandwidthLoadSource != "dcgm_mem_copy_util" {
+		t.Fatalf("expected memory copy utilization bandwidth source, got %+v", normalized.CurrentLoadSummary)
+	}
+	if normalized.CurrentLoadSummary.SaturationSource != "approximate" {
+		t.Fatalf("expected approximate saturation source, got %+v", normalized.CurrentLoadSummary)
+	}
+	if normalized.CurrentLoadSummary.RealSaturationMetricsAvailable {
+		t.Fatalf("expected measured saturation metrics to be unavailable, got %+v", normalized.CurrentLoadSummary)
 	}
 }
 

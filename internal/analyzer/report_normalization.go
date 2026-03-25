@@ -48,16 +48,16 @@ func NormalizeReport(report *model.AnalysisReport, fallbackIntent WorkloadIntent
 }
 
 func appendSaturationWarnings(existing []string, report *model.AnalysisReport, features FeatureSet) []string {
-	if strings.TrimSpace(features.SaturationSource) != "gpu_utilization_proxy" {
+	if strings.TrimSpace(features.SaturationSource) != saturationSourceApproximate {
 		return existing
 	}
-	reason := "DCGM compute counters were not present in the collected telemetry."
+	reason := "DCGM profiler counters were not present in the collected telemetry."
 	if detailed := saturationWarningReason(report); detailed != "" {
 		reason = detailed
 	}
 	return appendUniqueWarning(
 		existing,
-		"Real GPU saturation metrics unavailable: "+reason+" InferLean is showing GPU utilization as a proxy instead of measured compute saturation.",
+		"Measured GPU load counters were not fully available: "+reason+" InferLean is showing approximate GPU activity/load where needed.",
 	)
 }
 

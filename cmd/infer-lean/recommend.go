@@ -114,7 +114,7 @@ func runAnalyze(args []string, stdout, stderr io.Writer) error {
 	}
 	recordCLIEvent("analyze.complete", nil)
 	if ui.Enabled() {
-		if report.CurrentLoadSummary != nil && strings.TrimSpace(report.CurrentLoadSummary.SaturationSource) == "gpu_utilization_proxy" {
+		if report.CurrentLoadSummary != nil && strings.TrimSpace(report.CurrentLoadSummary.SaturationSource) == "approximate" {
 			recordCLIEvent("analyze.output.proxy_utilization", nil)
 		}
 		ui.RenderAnalyzeSummaryCard(report)

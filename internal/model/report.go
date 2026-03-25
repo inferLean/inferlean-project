@@ -143,6 +143,7 @@ type FeatureSummary struct {
 	AvgGPUComputeLoadPct           float64 `json:"avg_gpu_compute_load_pct,omitempty"`
 	ComputeLoadSource              string  `json:"compute_load_source,omitempty"`
 	AvgGPUMemoryBandwidthLoadPct   float64 `json:"avg_gpu_memory_bandwidth_load_pct,omitempty"`
+	MemoryBandwidthLoadSource      string  `json:"memory_bandwidth_load_source,omitempty"`
 	MemoryBandwidthLoadAvailable   bool    `json:"memory_bandwidth_load_available,omitempty"`
 	AvgGPUTensorLoadPct            float64 `json:"avg_gpu_tensor_load_pct,omitempty"`
 	TensorLoadAvailable            bool    `json:"tensor_load_available,omitempty"`
@@ -194,6 +195,7 @@ type CurrentLoadSummary struct {
 	ComputeLoadPct                  float64 `json:"compute_load_pct,omitempty"`
 	ComputeLoadSource               string  `json:"compute_load_source,omitempty"`
 	MemoryBandwidthLoadPct          float64 `json:"memory_bandwidth_load_pct,omitempty"`
+	MemoryBandwidthLoadSource       string  `json:"memory_bandwidth_load_source,omitempty"`
 	MemoryBandwidthLoadAvailable    bool    `json:"memory_bandwidth_load_available,omitempty"`
 	TensorLoadPct                   float64 `json:"tensor_load_pct,omitempty"`
 	TensorLoadAvailable             bool    `json:"tensor_load_available,omitempty"`

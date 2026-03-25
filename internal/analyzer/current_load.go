@@ -87,6 +87,7 @@ func buildCurrentLoadSummary(report *model.AnalysisReport, intent WorkloadIntent
 		ComputeLoadPct:                  clampFloat(features.AvgGPUComputeLoadPct, 0, 100),
 		ComputeLoadSource:               strings.TrimSpace(features.ComputeLoadSource),
 		MemoryBandwidthLoadPct:          clampFloat(features.AvgGPUMemoryBandwidthLoadPct, 0, 100),
+		MemoryBandwidthLoadSource:       strings.TrimSpace(features.MemoryBandwidthLoadSource),
 		MemoryBandwidthLoadAvailable:    features.MemoryBandwidthLoadAvailable,
 		TensorLoadPct:                   clampFloat(features.AvgGPUTensorLoadPct, 0, 100),
 		TensorLoadAvailable:             features.TensorLoadAvailable,

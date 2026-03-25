@@ -175,12 +175,6 @@ func collectPrometheusMetrics(ctx context.Context, opts PrometheusCollectionOpti
 	}
 	debugf("prometheus collection: prometheus port=%d node_port=%d dcgm_port=%d", promPort, nodePort, dcgmPort)
 
-	cfgPath := filepath.Join(workDir, "prometheus.yml")
-	cfg := buildPrometheusConfig(nodePort, dcgmPort, vllmTarget, vllmMetricsPath)
-	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
-		return "", fmt.Errorf("write prometheus config: %w", err)
-	}
-
 	var started []*managedProcess
 	collectionOutputs := map[string]string{
 		"prometheus_binary":    promBinary,
@@ -220,80 +214,60 @@ func collectPrometheusMetrics(ctx context.Context, opts PrometheusCollectionOpti
 
 	collectDCGMMetrics := false
 	collectionOutputs["dcgm_exporter_start"] = "skipped"
-	dcgmURL := fmt.Sprintf("http://127.0.0.1:%d/metrics", dcgmPort)
-	if endpointReady(ctx, dcgmURL) {
+	activeDCGMPort := dcgmPort
+	dcgmURL := fmt.Sprintf("http://127.0.0.1:%d/metrics", activeDCGMPort)
+	existingDCGMReady := endpointReady(ctx, dcgmURL)
+	needsProfilerSidecar := false
+	if existingDCGMReady {
 		collectDCGMMetrics = true
 		collectionOutputs["dcgm_exporter_start"] = "reused existing process"
 		collectionOutputs["dcgm_exporter_binary"] = "reused existing endpoint"
 		debugf("prometheus collection: reusing existing dcgm_exporter endpoint")
-	} else {
-		runtimeBefore := findDCGMRuntimeLibrary()
-		runtimePath := runtimeBefore
-		if runtimePath == "" {
-			collectionOutputs["dcgm_runtime_install"] = "attempting install"
-			installedRuntimePath, installErr := ensureDCGMRuntime(ctx)
-			if installErr != nil {
-				collectionOutputs["dcgm_runtime_install"] = "failed"
-				setDCGMWarning(fmt.Sprintf("dcgm runtime install failed; continuing without DCGM metrics: %v", installErr))
-			} else {
-				runtimePath = installedRuntimePath
-				collectionOutputs["dcgm_runtime_install"] = "installed"
-				collectionOutputs["dcgm_runtime_library"] = runtimePath
-				_, _ = runPrivilegedCommandCapture(ctx, 60, "ldconfig")
-			}
-		} else {
-			collectionOutputs["dcgm_runtime_install"] = "present"
-			collectionOutputs["dcgm_runtime_library"] = runtimePath
-		}
-
-		dcgmBinary, err := resolveOrInstallTool(ctx, strings.TrimSpace(opts.DCGMExporterBinary), dcgmExporterInstallSpec())
-		if err != nil {
-			collectionOutputs["dcgm_exporter_binary"] = "not available"
-			setDCGMWarning(fmt.Sprintf("dcgm exporter unavailable; continuing without DCGM metrics: %v", err))
-		} else {
-			collectionOutputs["dcgm_exporter_binary"] = dcgmBinary
-			debugf("prometheus collection: using dcgm_exporter binary %s", dcgmBinary)
-			dcgmMetricsCSVPath, err := resolveDCGMMetricsCSVPath(workDir)
-			if err != nil {
-				setDCGMWarning(fmt.Sprintf("dcgm exporter metrics file unavailable; continuing without DCGM metrics: %v", err))
-			} else {
-				debugf("prometheus collection: starting dcgm_exporter with csv=%s", dcgmMetricsCSVPath)
-				proc, waitErr := startAndWaitForDCGMExporter(processCtx, ctx, workDir, dcgmBinary, dcgmMetricsCSVPath, dcgmURL)
-				if waitErr == nil {
-					started = append(started, proc)
-					collectDCGMMetrics = true
-					collectionOutputs["dcgm_exporter_start"] = "started by InferLean"
+		if metricNames, inspectErr := fetchPrometheusMetricBaseNames(ctx, dcgmURL); inspectErr == nil {
+			missingMeasuredCompute := !hasMeasuredDCGMComputeMetric(metricNames)
+			missingMeasuredBandwidth := !hasMeasuredDCGMBandwidthMetric(metricNames)
+			if missingMeasuredCompute || missingMeasuredBandwidth {
+				collectionOutputs["dcgm_exporter_start"] = "reused existing process (without full profiler coverage)"
+				sidecarPort, reserveErr := reserveFreePort()
+				if reserveErr == nil {
+					needsProfilerSidecar = true
+					activeDCGMPort = sidecarPort
+					dcgmURL = fmt.Sprintf("http://127.0.0.1:%d/metrics", activeDCGMPort)
 				} else {
-					if isMissingDCGMRuntimeError(waitErr) && collectionOutputs["dcgm_runtime_install"] != "installed" {
-						collectionOutputs["dcgm_runtime_install"] = "attempting install"
-						installedRuntimePath, installErr := ensureDCGMRuntime(ctx)
-						if installErr == nil {
-							runtimePath = installedRuntimePath
-							collectionOutputs["dcgm_runtime_install"] = "installed"
-							collectionOutputs["dcgm_runtime_library"] = runtimePath
-							_, _ = runPrivilegedCommandCapture(ctx, 60, "ldconfig")
-						}
-					}
-					collectionOutputs["dcgm_exporter_repair"] = "attempting rebuild"
-					repairedBinary, repairErr := repairDCGMExporterBinary(ctx)
-					if repairErr != nil {
-						collectionOutputs["dcgm_exporter_repair"] = "failed"
-						setDCGMWarning(fmt.Sprintf("dcgm exporter did not become ready; continuing without DCGM metrics: %v", waitErr))
-					} else {
-						collectionOutputs["dcgm_exporter_repair"] = "rebuilt"
-						collectionOutputs["dcgm_exporter_binary"] = repairedBinary
-						retryProc, retryErr := startAndWaitForDCGMExporter(processCtx, ctx, workDir, repairedBinary, dcgmMetricsCSVPath, dcgmURL)
-						if retryErr != nil {
-							setDCGMWarning(fmt.Sprintf("dcgm exporter still failed after rebuild; continuing without DCGM metrics: %v", retryErr))
-						} else {
-							started = append(started, retryProc)
-							collectDCGMMetrics = true
-							collectionOutputs["dcgm_exporter_start"] = "started by InferLean"
-						}
-					}
+					setDCGMWarning(fmt.Sprintf("existing dcgm exporter lacked full profiler coverage and InferLean could not reserve a sidecar port: %v", reserveErr))
 				}
 			}
+		} else {
+			setDCGMWarning(fmt.Sprintf("could not inspect existing dcgm exporter profiler coverage; reusing endpoint as-is: %v", inspectErr))
 		}
+	}
+	if !existingDCGMReady || needsProfilerSidecar {
+		proc, err := ensureDCGMExporterRunning(processCtx, ctx, workDir, opts.DCGMExporterBinary, activeDCGMPort, collectionOutputs, setDCGMWarning)
+		if err == nil {
+			started = append(started, proc)
+			collectDCGMMetrics = true
+			if activeDCGMPort != dcgmPort {
+				collectionOutputs["dcgm_exporter_start"] = "started by InferLean alongside existing endpoint"
+				collectionOutputs["dcgm_exporter_port"] = strconv.Itoa(activeDCGMPort)
+			} else {
+				collectionOutputs["dcgm_exporter_start"] = "started by InferLean"
+			}
+		} else if existingDCGMReady {
+			activeDCGMPort = dcgmPort
+			dcgmURL = fmt.Sprintf("http://127.0.0.1:%d/metrics", activeDCGMPort)
+			collectDCGMMetrics = true
+		}
+	}
+
+	cfgPath := filepath.Join(workDir, "prometheus.yml")
+	cfg := buildPrometheusConfig(nodePort, func() int {
+		if collectDCGMMetrics {
+			return activeDCGMPort
+		}
+		return 0
+	}(), vllmTarget, vllmMetricsPath)
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		return "", fmt.Errorf("write prometheus config: %w", err)
 	}
 
 	vllmURL := fmt.Sprintf("http://%s%s", vllmTarget, vllmMetricsPath)
@@ -612,6 +586,7 @@ samplingLoop:
 
 var preferredDCGMProfilerMetrics = []string{
 	"DCGM_FI_PROF_SM_ACTIVE",
+	"DCGM_FI_PROF_SM_OCCUPANCY",
 	"DCGM_FI_PROF_GR_ENGINE_ACTIVE",
 	"DCGM_FI_PROF_PIPE_TENSOR_ACTIVE",
 	"DCGM_FI_PROF_PIPE_FP16_ACTIVE",
@@ -624,20 +599,48 @@ func recordDCGMProfilerCoverage(outputs map[string]string, dcgmSeries map[string
 	if outputs == nil {
 		return
 	}
-	found, missing := summarizeDCGMProfilerCoverage(dcgmSeries)
-	outputs["dcgm_profiler_metrics_available"] = fmt.Sprintf("%t", len(found) > 0)
+	metricNames := dcgmMetricBaseNames(dcgmSeries)
+	found, missing := summarizeDCGMProfilerCoverageFromNames(metricNames)
+	computeAvailable := hasMeasuredDCGMComputeMetric(metricNames)
+	bandwidthAvailable := hasMeasuredDCGMBandwidthMetric(metricNames)
+	outputs["dcgm_profiler_metrics_available"] = fmt.Sprintf("%t", computeAvailable || bandwidthAvailable)
+	outputs["dcgm_measured_compute_available"] = fmt.Sprintf("%t", computeAvailable)
+	outputs["dcgm_measured_bandwidth_available"] = fmt.Sprintf("%t", bandwidthAvailable)
 	if len(found) > 0 {
 		outputs["dcgm_profiler_metrics_found"] = strings.Join(found, ",")
 	}
 	if len(missing) > 0 {
 		outputs["dcgm_profiler_metrics_missing"] = strings.Join(missing, ",")
 	}
-	if len(found) == 0 {
-		outputs["dcgm_profiler_warning"] = "DCGM exporter was reachable but did not expose SM, GR engine, tensor/FP pipe, or DRAM profiling counters."
+	switch {
+	case !computeAvailable && !bandwidthAvailable:
+		outputs["dcgm_profiler_warning"] = "DCGM exporter was reachable but did not expose measured SM/GR/tensor compute or DRAM activity counters."
+	case !computeAvailable:
+		outputs["dcgm_profiler_warning"] = "DCGM exporter was reachable but did not expose measured GPU compute counters."
+	case !bandwidthAvailable:
+		outputs["dcgm_profiler_warning"] = "DCGM exporter was reachable but did not expose measured GPU DRAM activity counters."
 	}
 }
 
 func summarizeDCGMProfilerCoverage(dcgmSeries map[string]map[int64]float64) (found []string, missing []string) {
+	return summarizeDCGMProfilerCoverageFromNames(dcgmMetricBaseNames(dcgmSeries))
+}
+
+func summarizeDCGMProfilerCoverageFromNames(metricNames map[string]bool) (found []string, missing []string) {
+	if len(metricNames) == 0 {
+		return nil, append([]string(nil), preferredDCGMProfilerMetrics...)
+	}
+	for _, metricName := range preferredDCGMProfilerMetrics {
+		if metricNames[metricName] {
+			found = append(found, metricName)
+		} else {
+			missing = append(missing, metricName)
+		}
+	}
+	return found, missing
+}
+
+func dcgmMetricBaseNames(dcgmSeries map[string]map[int64]float64) map[string]bool {
 	present := map[string]bool{}
 	for metricName, series := range dcgmSeries {
 		if len(series) == 0 {
@@ -649,14 +652,61 @@ func summarizeDCGMProfilerCoverage(dcgmSeries map[string]map[int64]float64) (fou
 		}
 		present[baseName] = true
 	}
-	for _, metricName := range preferredDCGMProfilerMetrics {
-		if present[metricName] {
-			found = append(found, metricName)
-		} else {
-			missing = append(missing, metricName)
+	return present
+}
+
+func hasMeasuredDCGMComputeMetric(metricNames map[string]bool) bool {
+	for _, metricName := range []string{
+		"DCGM_FI_PROF_SM_ACTIVE",
+		"DCGM_FI_PROF_SM_OCCUPANCY",
+		"DCGM_FI_PROF_GR_ENGINE_ACTIVE",
+		"DCGM_FI_PROF_PIPE_TENSOR_ACTIVE",
+		"DCGM_FI_PROF_PIPE_FP16_ACTIVE",
+		"DCGM_FI_PROF_PIPE_FP32_ACTIVE",
+		"DCGM_FI_PROF_PIPE_FP64_ACTIVE",
+	} {
+		if metricNames[metricName] {
+			return true
 		}
 	}
-	return found, missing
+	return false
+}
+
+func hasMeasuredDCGMBandwidthMetric(metricNames map[string]bool) bool {
+	return metricNames["DCGM_FI_PROF_DRAM_ACTIVE"]
+}
+
+func fetchPrometheusMetricBaseNames(ctx context.Context, endpoint string) (map[string]bool, error) {
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	metricNames := map[string]bool{}
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		baseName := prometheusMetricBaseName(fields[0])
+		if baseName != "" {
+			metricNames[baseName] = true
+		}
+	}
+	return metricNames, nil
 }
 
 func prometheusMetricBaseName(metricName string) string {
@@ -764,8 +814,96 @@ func resolveDCGMMetricsCSVPath(workDir string) (string, error) {
 	return path, nil
 }
 
-func startAndWaitForDCGMExporter(processCtx, waitCtx context.Context, workDir, dcgmBinary, dcgmMetricsCSVPath, dcgmURL string) (*managedProcess, error) {
-	proc, err := startProcess(processCtx, workDir, "dcgm_exporter", dcgmBinary, "-f", dcgmMetricsCSVPath)
+func ensureDCGMExporterRunning(
+	processCtx, waitCtx context.Context,
+	workDir string,
+	dcgmBinaryOverride string,
+	port int,
+	outputs map[string]string,
+	warn func(string),
+) (*managedProcess, error) {
+	runtimePath := findDCGMRuntimeLibrary()
+	if runtimePath == "" {
+		outputs["dcgm_runtime_install"] = "attempting install"
+		installedRuntimePath, installErr := ensureDCGMRuntime(waitCtx)
+		if installErr != nil {
+			outputs["dcgm_runtime_install"] = "failed"
+			if warn != nil {
+				warn(fmt.Sprintf("dcgm runtime install failed; continuing without DCGM metrics: %v", installErr))
+			}
+			return nil, installErr
+		}
+		runtimePath = installedRuntimePath
+		outputs["dcgm_runtime_install"] = "installed"
+		outputs["dcgm_runtime_library"] = runtimePath
+		_, _ = runPrivilegedCommandCapture(waitCtx, 60, "ldconfig")
+	} else {
+		outputs["dcgm_runtime_install"] = "present"
+		outputs["dcgm_runtime_library"] = runtimePath
+	}
+
+	dcgmBinary, err := resolveOrInstallTool(waitCtx, strings.TrimSpace(dcgmBinaryOverride), dcgmExporterInstallSpec())
+	if err != nil {
+		outputs["dcgm_exporter_binary"] = "not available"
+		if warn != nil {
+			warn(fmt.Sprintf("dcgm exporter unavailable; continuing without DCGM metrics: %v", err))
+		}
+		return nil, err
+	}
+	outputs["dcgm_exporter_binary"] = dcgmBinary
+	debugf("prometheus collection: using dcgm_exporter binary %s", dcgmBinary)
+
+	dcgmMetricsCSVPath, err := resolveDCGMMetricsCSVPath(workDir)
+	if err != nil {
+		if warn != nil {
+			warn(fmt.Sprintf("dcgm exporter metrics file unavailable; continuing without DCGM metrics: %v", err))
+		}
+		return nil, err
+	}
+
+	dcgmURL := fmt.Sprintf("http://127.0.0.1:%d/metrics", port)
+	debugf("prometheus collection: starting dcgm_exporter with csv=%s on port=%d", dcgmMetricsCSVPath, port)
+	proc, waitErr := startAndWaitForDCGMExporter(processCtx, waitCtx, workDir, dcgmBinary, dcgmMetricsCSVPath, dcgmURL, port)
+	if waitErr == nil {
+		return proc, nil
+	}
+
+	if isMissingDCGMRuntimeError(waitErr) && outputs["dcgm_runtime_install"] != "installed" {
+		outputs["dcgm_runtime_install"] = "attempting install"
+		installedRuntimePath, installErr := ensureDCGMRuntime(waitCtx)
+		if installErr == nil {
+			runtimePath = installedRuntimePath
+			outputs["dcgm_runtime_install"] = "installed"
+			outputs["dcgm_runtime_library"] = runtimePath
+			_, _ = runPrivilegedCommandCapture(waitCtx, 60, "ldconfig")
+		}
+	}
+
+	outputs["dcgm_exporter_repair"] = "attempting rebuild"
+	repairedBinary, repairErr := repairDCGMExporterBinary(waitCtx)
+	if repairErr != nil {
+		outputs["dcgm_exporter_repair"] = "failed"
+		if warn != nil {
+			warn(fmt.Sprintf("dcgm exporter did not become ready; continuing without DCGM metrics: %v", waitErr))
+		}
+		return nil, waitErr
+	}
+
+	outputs["dcgm_exporter_repair"] = "rebuilt"
+	outputs["dcgm_exporter_binary"] = repairedBinary
+	retryProc, retryErr := startAndWaitForDCGMExporter(processCtx, waitCtx, workDir, repairedBinary, dcgmMetricsCSVPath, dcgmURL, port)
+	if retryErr != nil {
+		if warn != nil {
+			warn(fmt.Sprintf("dcgm exporter still failed after rebuild; continuing without DCGM metrics: %v", retryErr))
+		}
+		return nil, retryErr
+	}
+	return retryProc, nil
+}
+
+func startAndWaitForDCGMExporter(processCtx, waitCtx context.Context, workDir, dcgmBinary, dcgmMetricsCSVPath, dcgmURL string, port int) (*managedProcess, error) {
+	listenAddress := fmt.Sprintf("127.0.0.1:%d", port)
+	proc, err := startProcess(processCtx, workDir, "dcgm_exporter", dcgmBinary, "-f", dcgmMetricsCSVPath, "-a", listenAddress)
 	if err != nil {
 		return nil, err
 	}

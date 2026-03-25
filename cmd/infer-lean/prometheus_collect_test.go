@@ -223,7 +223,7 @@ func TestRecordDCGMProfilerCoverageWarnsWhenProfilerMetricsAbsent(t *testing.T) 
 	if outputs["dcgm_profiler_metrics_available"] != "false" {
 		t.Fatalf("expected profiler metrics to be unavailable, got %+v", outputs)
 	}
-	if !strings.Contains(outputs["dcgm_profiler_warning"], "did not expose SM, GR engine, tensor/FP pipe, or DRAM profiling counters") {
+	if !strings.Contains(outputs["dcgm_profiler_warning"], "did not expose measured SM/GR/tensor compute or DRAM activity counters") {
 		t.Fatalf("expected profiler warning, got %+v", outputs)
 	}
 }

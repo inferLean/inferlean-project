@@ -69,6 +69,7 @@ type FeatureSet struct {
 	AvgGPUComputeLoadPct           float64
 	ComputeLoadSource              string
 	AvgGPUMemoryBandwidthLoadPct   float64
+	MemoryBandwidthLoadSource      string
 	MemoryBandwidthLoadAvailable   bool
 	AvgGPUTensorLoadPct            float64
 	TensorLoadAvailable            bool

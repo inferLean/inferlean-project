@@ -55,6 +55,7 @@ type saturationBreakdown struct {
 	ComputeIsProxy  bool
 	Memory          float64
 	MemoryAvailable bool
+	MemoryIsApprox  bool
 	CPU             float64
 }
 
@@ -429,6 +430,7 @@ func buildAnalysisSnapshot(report *model.AnalysisReport, recommendation *model.R
 					ComputeIsProxy:  report.CurrentLoadSummary.ComputeLoadSource == "gpu_utilization_proxy",
 					Memory:          report.CurrentLoadSummary.MemoryBandwidthLoadPct,
 					MemoryAvailable: memoryBandwidthAvailable(report.CurrentLoadSummary),
+					MemoryIsApprox:  report.CurrentLoadSummary.MemoryBandwidthLoadSource == "dcgm_mem_copy_util",
 					CPU:             report.CurrentLoadSummary.CPULoadPct,
 				}
 			}
@@ -624,10 +626,13 @@ func humanizeDominantResource(load *model.CurrentLoadSummary) string {
 	switch strings.TrimSpace(load.DominantGPUResource) {
 	case "compute":
 		if strings.TrimSpace(load.ComputeLoadSource) == "gpu_utilization_proxy" {
-			return "GPU busy (utilization proxy)"
+			return "GPU activity (approx.)"
 		}
 		return "GPU compute (avg)"
 	case "memory_bandwidth":
+		if strings.TrimSpace(load.MemoryBandwidthLoadSource) == "dcgm_mem_copy_util" {
+			return "GPU bandwidth (approx.)"
+		}
 		return "GPU bandwidth (avg)"
 	case "tensor":
 		return "Tensor activity (avg)"
@@ -637,20 +642,31 @@ func humanizeDominantResource(load *model.CurrentLoadSummary) string {
 }
 
 func analysisLoadLabel(load *model.CurrentLoadSummary) string {
-	if load != nil && strings.TrimSpace(load.SaturationSource) == "gpu_utilization_proxy" {
-		return "Utilization"
+	if load != nil && strings.TrimSpace(load.SaturationSource) == "approximate" {
+		return "Approx. Load"
 	}
 	return "Saturation"
 }
 
 func saturationProxyWarning(load *model.CurrentLoadSummary) string {
-	if load == nil || strings.TrimSpace(load.SaturationSource) != "gpu_utilization_proxy" {
+	if load == nil || strings.TrimSpace(load.SaturationSource) != "approximate" {
 		return ""
 	}
-	if memoryBandwidthAvailable(load) {
-		return "Real GPU compute counters were unavailable, so this is GPU utilization, not measured compute saturation."
+	computeApprox := strings.TrimSpace(load.ComputeLoadSource) == "gpu_utilization_proxy"
+	bandwidthApprox := strings.TrimSpace(load.MemoryBandwidthLoadSource) == "dcgm_mem_copy_util"
+	bandwidthMeasured := memoryBandwidthAvailable(load) && !bandwidthApprox
+	switch {
+	case computeApprox && bandwidthMeasured:
+		return "Approximate GPU activity is shown from device utilization because measured SM counters were unavailable."
+	case computeApprox && bandwidthApprox:
+		return "Approximate GPU activity is shown from device utilization; GPU bandwidth is approximate from memory-copy utilization."
+	case computeApprox:
+		return "Approximate GPU activity is shown from device utilization because measured SM and DRAM counters were unavailable."
+	case bandwidthApprox:
+		return "GPU bandwidth is approximate from memory-copy utilization because measured DRAM activity counters were unavailable."
+	default:
+		return ""
 	}
-	return "Real GPU compute and bandwidth counters were unavailable, so this is GPU utilization, not measured saturation."
 }
 
 func humanizeObjective(value string) string {
@@ -959,11 +975,14 @@ func memoryBandwidthAvailable(load *model.CurrentLoadSummary) bool {
 func (ui terminalUI) renderSaturationBreakdown(b saturationBreakdown) string {
 	computeText := fmt.Sprintf("GPU compute %.0f%%", b.Compute)
 	if b.ComputeIsProxy {
-		computeText = fmt.Sprintf("GPU busy %.0f%% (utilization proxy)", b.Compute)
+		computeText = fmt.Sprintf("GPU activity %.0f%% (approx.)", b.Compute)
 	}
 	memoryText := "GPU bandwidth N/A"
 	if b.MemoryAvailable {
 		memoryText = fmt.Sprintf("GPU bandwidth %.0f%%", b.Memory)
+		if b.MemoryIsApprox {
+			memoryText = fmt.Sprintf("GPU bandwidth %.0f%% (approx.)", b.Memory)
+		}
 	}
 	parts := []string{
 		ui.renderSeveritySegment(computeText, saturationTone(b.Compute)),

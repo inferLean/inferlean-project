@@ -81,7 +81,7 @@ func canEstimateCapacityHeadroom(report *model.AnalysisReport) bool {
 	if report == nil || report.CurrentLoadSummary == nil {
 		return true
 	}
-	return strings.TrimSpace(report.CurrentLoadSummary.SaturationSource) != "gpu_utilization_proxy"
+	return strings.TrimSpace(report.CurrentLoadSummary.SaturationSource) == saturationSourceMeasured
 }
 
 func serviceBottleneck(load *model.CurrentLoadSummary) model.BottleneckSummary {

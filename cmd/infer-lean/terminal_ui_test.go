@@ -247,7 +247,7 @@ func TestRenderAnalyzeSummaryCardLabelsUtilizationProxyAndMissingBandwidth(t *te
 			ComputeLoadSource:            "gpu_utilization_proxy",
 			MemoryBandwidthLoadPct:       0,
 			MemoryBandwidthLoadAvailable: false,
-			SaturationSource:             "gpu_utilization_proxy",
+			SaturationSource:             "approximate",
 			CPULoadPct:                   1,
 		},
 	}
@@ -257,17 +257,18 @@ func TestRenderAnalyzeSummaryCardLabelsUtilizationProxyAndMissingBandwidth(t *te
 	ui.RenderAnalyzeSummaryCard(report)
 
 	rendered := out.String()
-	if !strings.Contains(rendered, "Utilization") {
-		t.Fatalf("expected utilization row label, got %q", rendered)
+	if !strings.Contains(rendered, "Approx. Load") {
+		t.Fatalf("expected approximate load row label, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "High: 97% GPU busy (utilization proxy)") {
+	if !strings.Contains(rendered, "High: 97% GPU activity (approx.)") {
 		t.Fatalf("expected proxy wording in saturation headline, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "GPU busy 97% (utilization proxy), GPU bandwidth N/A, CPU 1%") {
+	if !strings.Contains(rendered, "GPU activity 97% (approx.), GPU bandwidth N/A, CPU 1%") {
 		t.Fatalf("expected missing bandwidth to render as N/A, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "Real GPU compute and bandwidth counters were unavailable") || !strings.Contains(rendered, "not measured saturation.") {
-		t.Fatalf("expected proxy saturation warning, got %q", rendered)
+	if !strings.Contains(rendered, "Approximate GPU activity is shown from device utilization because") ||
+		!strings.Contains(rendered, "measured SM and DRAM counters were unavailable.") {
+		t.Fatalf("expected approximate load note, got %q", rendered)
 	}
 }
 
