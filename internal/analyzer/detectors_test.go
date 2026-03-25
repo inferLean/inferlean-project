@@ -13,8 +13,8 @@ import (
 
 func TestDetectorCatalogContainsExpectedIDs(t *testing.T) {
 	all := allDetectors()
-	if len(all) != 12 {
-		t.Fatalf("expected 12 detectors in catalog, got %d", len(all))
+	if len(all) != 14 {
+		t.Fatalf("expected 14 detectors in catalog, got %d", len(all))
 	}
 
 	var ids []string
@@ -28,6 +28,8 @@ func TestDetectorCatalogContainsExpectedIDs(t *testing.T) {
 		detectorGPUHardwareInstability,
 		detectorGPUMemorySaturation,
 		detectorKVCachePressurePreemptions,
+		detectorMultimodalCacheIneffective,
+		detectorMultimodalPreprocessingCPUBottleneck,
 		detectorPrefillHeavyWorkload,
 		detectorPrefixCacheIneffective,
 		detectorPromptRecomputationThrashing,
@@ -42,8 +44,8 @@ func TestDetectorCatalogContainsExpectedIDs(t *testing.T) {
 	}
 
 	implemented := implementedDetectors()
-	if len(implemented) != 12 {
-		t.Fatalf("expected 12 implemented detectors, got %d", len(implemented))
+	if len(implemented) != 14 {
+		t.Fatalf("expected 14 implemented detectors, got %d", len(implemented))
 	}
 	for _, detector := range implemented {
 		if !detector.Spec().Implemented {
@@ -86,8 +88,8 @@ func TestIdleFixtureProducesNoActionableRecommendations(t *testing.T) {
 	if summary.DataQuality.TrafficObserved {
 		t.Fatalf("expected idle fixture to have no observed traffic")
 	}
-	if len(summary.Findings) != 12 {
-		t.Fatalf("expected 12 implemented findings, got %d", len(summary.Findings))
+	if len(summary.Findings) != 14 {
+		t.Fatalf("expected 14 implemented findings, got %d", len(summary.Findings))
 	}
 	for _, finding := range summary.Findings {
 		if finding.Status == model.FindingStatusPresent {
@@ -151,8 +153,74 @@ func TestAnalysisReportSerializationIncludesSummary(t *testing.T) {
 	if decoded.AnalysisSummary == nil {
 		t.Fatalf("expected analysis summary after roundtrip")
 	}
-	if len(decoded.AnalysisSummary.Findings) != 12 {
+	if len(decoded.AnalysisSummary.Findings) != 14 {
 		t.Fatalf("expected findings after roundtrip, got %+v", decoded.AnalysisSummary)
+	}
+}
+
+func TestMultimodalPreprocessingCPUBottleneckDetector(t *testing.T) {
+	report := syntheticReport(30, map[string]float64{
+		"gpu_utilization_pct":                    28,
+		"node_cpu_utilization_pct":               82,
+		"vllm:num_requests_running":              1,
+		"vllm:num_requests_waiting":              2,
+		"vllm:request_success_total":             100,
+		"vllm:mm_cache_queries_total":            12,
+		"vllm:mm_cache_hits_total":               1,
+		"vllm:time_to_first_token_seconds_sum":   180,
+		"vllm:time_to_first_token_seconds_count": 100,
+		"vllm:request_queue_time_seconds_sum":    60,
+		"vllm:request_queue_time_seconds_count":  100,
+	}, map[string]float64{
+		"gpu_utilization_pct":                    34,
+		"node_cpu_utilization_pct":               91,
+		"vllm:num_requests_running":              1,
+		"vllm:num_requests_waiting":              3,
+		"vllm:request_success_total":             140,
+		"vllm:mm_cache_queries_total":            32,
+		"vllm:mm_cache_hits_total":               2,
+		"vllm:time_to_first_token_seconds_sum":   280,
+		"vllm:time_to_first_token_seconds_count": 140,
+		"vllm:request_queue_time_seconds_sum":    110,
+		"vllm:request_queue_time_seconds_count":  140,
+	})
+	report.CurrentVLLMConfigurations = map[string]any{
+		"model_name":                    "Qwen2.5-VL-7B-Instruct",
+		"disable_mm_preprocessor_cache": true,
+	}
+	report.OSInformation.AverageCPUUtilizationPct = 91
+
+	summary := SummarizeReport(report, BalancedIntent)
+	finding := mustFindByID(t, summary.Findings, detectorMultimodalPreprocessingCPUBottleneck)
+	if finding.Status != model.FindingStatusPresent {
+		t.Fatalf("expected multimodal preprocessing bottleneck to be present, got %+v", finding)
+	}
+}
+
+func TestMultimodalCacheIneffectiveDetector(t *testing.T) {
+	report := syntheticReport(30, map[string]float64{
+		"gpu_utilization_pct":         36,
+		"node_cpu_utilization_pct":    74,
+		"vllm:request_success_total":  100,
+		"vllm:mm_cache_queries_total": 50,
+		"vllm:mm_cache_hits_total":    2,
+	}, map[string]float64{
+		"gpu_utilization_pct":         40,
+		"node_cpu_utilization_pct":    80,
+		"vllm:request_success_total":  150,
+		"vllm:mm_cache_queries_total": 95,
+		"vllm:mm_cache_hits_total":    4,
+	})
+	report.CurrentVLLMConfigurations = map[string]any{
+		"model_name":                    "Qwen2.5-VL-7B-Instruct",
+		"disable_mm_preprocessor_cache": false,
+	}
+	report.OSInformation.AverageCPUUtilizationPct = 80
+
+	summary := SummarizeReport(report, BalancedIntent)
+	finding := mustFindByID(t, summary.Findings, detectorMultimodalCacheIneffective)
+	if finding.Status != model.FindingStatusPresent {
+		t.Fatalf("expected multimodal cache finding to be present, got %+v", finding)
 	}
 }
 

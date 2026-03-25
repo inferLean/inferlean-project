@@ -233,6 +233,112 @@ func newCPUOrHostBottleneckDetector() Detector {
 	}
 }
 
+func newMultimodalPreprocessingCPUBottleneckDetector() Detector {
+	spec := DetectorSpec{
+		ID:          detectorMultimodalPreprocessingCPUBottleneck,
+		Category:    "multimodal",
+		Implemented: true,
+		MinDataRequirements: []string{
+			"node_cpu_utilization_pct",
+			"vllm:mm_cache_queries_total",
+		},
+	}
+
+	return detectorFunc{
+		spec: spec,
+		eval: func(features FeatureSet) (model.Finding, error) {
+			mmHitRate := safeHitRate(features.MMCacheHitsDelta, features.MMCacheQueriesDelta)
+			baseEvidence := []model.EvidenceItem{
+				evidence("multimodal_likely", boolToMetricValue(features.MultimodalLikely), "bool"),
+				evidence("avg_cpu_utilization_pct", features.AverageCPUUtilizationPct, ""),
+				evidence("avg_gpu_utilization_pct", features.AvgGPUUtilizationPct, ""),
+				evidence("avg_ttft_seconds", features.AvgTTFTSeconds, ""),
+				evidence("avg_queue_time_seconds", features.AvgQueueTimeSeconds, ""),
+				evidence("mm_cache_queries_delta", features.MMCacheQueriesDelta, ""),
+				evidence("mm_cache_hit_rate", mmHitRate, "ratio"),
+			}
+
+			if !features.TrafficObserved {
+				return insufficientFinding(spec, "Need live traffic before deciding whether multimodal preprocessing is the dominant bottleneck.", 0.25, baseEvidence...), nil
+			}
+			if !features.MultimodalLikely {
+				return absentFinding(spec, "Observed traffic does not look multimodal enough for host-side media preprocessing to be the dominant limiter.", 0.82, baseEvidence...), nil
+			}
+			if features.AverageCPUUtilizationPct <= 0 {
+				return insufficientFinding(spec, "Traffic was observed, but host CPU telemetry was not available enough to diagnose multimodal preprocessing pressure.", 0.35, baseEvidence...), nil
+			}
+			if features.MMCacheQueriesDelta < 5 && !features.MMPreprocessorCacheDisabled {
+				return insufficientFinding(spec, "Observed window did not contain enough multimodal processor activity to judge preprocessing pressure confidently.", 0.4, baseEvidence...), nil
+			}
+
+			cpuHot := features.AverageCPUUtilizationPct >= 75
+			gpuSlack := features.AvgGPUUtilizationPct > 0 && features.AvgGPUUtilizationPct < 55
+			preGPULatencyGap := features.AvgTTFTSeconds >= 1.2 || features.AvgQueueTimeSeconds >= 0.6
+			cacheRisk := features.MMPreprocessorCacheDisabled || mmHitRate < 0.2
+			if cpuHot && gpuSlack && preGPULatencyGap && cacheRisk {
+				severity := model.SeverityMedium
+				confidence := 0.84
+				if features.AverageCPUUtilizationPct >= 88 && features.AvgGPUUtilizationPct < 40 && (features.MMPreprocessorCacheDisabled || mmHitRate < 0.1) {
+					severity = model.SeverityHigh
+					confidence = 0.92
+				}
+				return presentFinding(spec, severity, "Multimodal request preprocessing appears CPU-bound before the GPU saturates, which suggests the input pipeline is limiting end-to-end latency and throughput.", confidence, baseEvidence...), nil
+			}
+
+			return absentFinding(spec, "Current multimodal telemetry does not show host-side preprocessing standing out as the dominant limiter.", 0.77, baseEvidence...), nil
+		},
+	}
+}
+
+func newMultimodalCacheIneffectiveDetector() Detector {
+	spec := DetectorSpec{
+		ID:          detectorMultimodalCacheIneffective,
+		Category:    "multimodal",
+		Implemented: true,
+		MinDataRequirements: []string{
+			"vllm:mm_cache_queries_total",
+			"vllm:mm_cache_hits_total",
+		},
+	}
+
+	return detectorFunc{
+		spec: spec,
+		eval: func(features FeatureSet) (model.Finding, error) {
+			hitRate := safeHitRate(features.MMCacheHitsDelta, features.MMCacheQueriesDelta)
+			baseEvidence := []model.EvidenceItem{
+				evidence("multimodal_likely", boolToMetricValue(features.MultimodalLikely), "bool"),
+				evidence("mm_cache_queries_delta", features.MMCacheQueriesDelta, ""),
+				evidence("mm_cache_hits_delta", features.MMCacheHitsDelta, ""),
+				evidence("mm_cache_hit_rate", hitRate, "ratio"),
+				evidence("mm_preprocessor_cache_disabled", boolToMetricValue(features.MMPreprocessorCacheDisabled), "bool"),
+				evidence("avg_cpu_utilization_pct", features.AverageCPUUtilizationPct, ""),
+			}
+
+			if !features.TrafficObserved {
+				return insufficientFinding(spec, "Need live traffic before deciding whether multimodal cache reuse is ineffective.", 0.25, baseEvidence...), nil
+			}
+			if !features.MultimodalLikely {
+				return absentFinding(spec, "Observed traffic does not look multimodal enough for multimodal cache reuse to be a meaningful limiter.", 0.83, baseEvidence...), nil
+			}
+			if features.MMCacheQueriesDelta < 20 && !features.MMPreprocessorCacheDisabled {
+				return insufficientFinding(spec, "Observed window did not include enough multimodal cache activity to judge reuse quality confidently.", 0.38, baseEvidence...), nil
+			}
+
+			if features.MMPreprocessorCacheDisabled || hitRate < 0.2 {
+				severity := model.SeverityLow
+				confidence := 0.8
+				if features.MMPreprocessorCacheDisabled || hitRate < 0.1 || features.MMCacheQueriesDelta >= 80 {
+					severity = model.SeverityMedium
+					confidence = 0.89
+				}
+				return presentFinding(spec, severity, "Multimodal processor cache reuse looks weak, so repeated image or media preprocessing work is likely being redone on the host.", confidence, baseEvidence...), nil
+			}
+
+			return absentFinding(spec, "Multimodal cache hit rate looks healthy enough that repeated media preprocessing is unlikely to be the dominant issue.", 0.79, baseEvidence...), nil
+		},
+	}
+}
+
 func newGPUMemorySaturationWithoutThroughputDetector() Detector {
 	spec := DetectorSpec{
 		ID:          detectorGPUMemorySaturation,

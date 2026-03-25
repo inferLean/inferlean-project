@@ -139,7 +139,7 @@ The following backlog is based on recurring vLLM operational issues documented i
 
 | Proposed detector | Why it matters | Candidate signals | Source basis |
 | --- | --- | --- | --- |
-| `multimodal_preprocessing_cpu_bottleneck` | vLLM documents that media loading uses CPU threads, multimodal processor caching exists to avoid repeated processing, and cache/thread settings materially affect performance. This is a narrower high-value specialization of the host bottleneck case. | High CPU, low GPU, multimodal model, image/video traffic, low `mm_cache_hits/mm_cache_queries`, low request running, queue growth. | [Optimization and Tuning: Parallel Processing and Multi-Modal Caching](https://docs.vllm.ai/en/stable/configuration/optimization/), [Production Metrics](https://docs.vllm.ai/en/stable/usage/metrics/) |
+| `multimodal_preprocessing_cpu_bottleneck` | `multimodal` | `implemented` | Multimodal request preprocessing appears CPU-bound before GPU saturation. |
 
 ### Priority 2
 
@@ -147,7 +147,7 @@ The following backlog is based on recurring vLLM operational issues documented i
 | --- | --- | --- | --- |
 | `chunked_prefill_tradeoff_misaligned` | vLLM documents that `max_num_batched_tokens` tunes a real latency/throughput tradeoff under chunked prefill. Wrong values can hurt TTFT or ITL depending on workload intent. | High TTFT with throughput-first or poor decode latency with latency-first, long prompts, `max_num_batched_tokens`, prefill/decode timing split. | [Optimization and Tuning: Chunked Prefill](https://docs.vllm.ai/en/stable/configuration/optimization/), [Engine Arguments](https://docs.vllm.ai/en/latest/configuration/engine_args/) |
 | `long_prefill_starvation_or_unfairness` | vLLM exposes `max_num_partial_prefills`, `max_long_partial_prefills`, and `long_prefill_token_threshold` specifically to let shorter prompts jump ahead of long prompts. This suggests a detector for mixed workloads where long prefills hurt latency fairness. | Large prefill times, long prompts, short-request latency inflation, queue growth, chunked-prefill scheduler settings. | [Engine Arguments](https://docs.vllm.ai/en/latest/configuration/engine_args/) |
-| `multimodal_cache_ineffective` | vLLM exposes multimodal cache hit/query metrics and configurable multimodal processor cache size/type. Poor cache effectiveness causes repeated CPU-side work on repeated media. | `mm_cache_queries`, `mm_cache_hits`, multimodal model, repeated media-heavy traffic, CPU pressure. | [Optimization and Tuning: Multi-Modal Caching](https://docs.vllm.ai/en/stable/configuration/optimization/), [Production Metrics](https://docs.vllm.ai/en/stable/usage/metrics/) |
+| `multimodal_cache_ineffective` | `multimodal` | `implemented` | Weak multimodal processor cache reuse suggests repeated image/media preprocessing on the host. |
 | `mm_prompt_limits_too_permissive` | vLLM allows per-modality limits per prompt and multimodal processor kwargs like image crop settings. Overly permissive multimodal input limits can create CPU and memory spikes. | `limit_mm_per_prompt`, `mm_processor_kwargs`, multimodal traffic, CPU pressure, queue growth, high TTFT. | [Engine Arguments](https://docs.vllm.ai/en/latest/configuration/engine_args/) |
 
 ### Priority 3

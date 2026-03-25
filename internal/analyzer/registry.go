@@ -13,6 +13,8 @@ func allDetectors() []Detector {
 		newPrefillHeavyWorkloadDetector(),
 		newDecodeBoundGenerationDetector(),
 		newCPUOrHostBottleneckDetector(),
+		newMultimodalPreprocessingCPUBottleneckDetector(),
+		newMultimodalCacheIneffectiveDetector(),
 		newGPUMemorySaturationWithoutThroughputDetector(),
 		newGPUHardwareInstabilityDetector(),
 		newTextOnlyWorkloadOnMultimodalStackDetector(),

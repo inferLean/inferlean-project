@@ -214,7 +214,7 @@ func runEndToEnd(args []string, stdout, stderr io.Writer) error {
 	}
 	recordCLIEvent("run.trigger.complete", nil)
 
-	dashboardURL := fmt.Sprintf("%s/jobs/%s", baseURL, url.PathEscape(triggerResponse.ID))
+	dashboardURL := fmt.Sprintf("%s/optimizations/%s", baseURL, url.PathEscape(triggerResponse.ID))
 	fmt.Fprintf(stdout, "Job queued: %s\n", triggerResponse.ID)
 	if ui.Enabled() {
 		ui.Step("Waiting for analysis and recommendation...")
@@ -222,7 +222,7 @@ func runEndToEnd(args []string, stdout, stderr io.Writer) error {
 	var analysisProgress *terminalProgressBar
 	var recommendationProgress *terminalProgressBar
 	recordCLIEvent("run.wait.start", nil)
-	analysisReport, recommendationReport, topRecommendation, err := waitForJobCompletion(baseURL, triggerResponse.ID, authToken, func(update waitProgressUpdate) {
+	analysisReport, optimizationReport, err := waitForOptimizationCompletion(baseURL, triggerResponse.ID, authToken, func(update waitProgressUpdate) {
 		if !ui.Enabled() {
 			return
 		}
@@ -263,32 +263,18 @@ func runEndToEnd(args []string, stdout, stderr io.Writer) error {
 	}
 	recordCLIEvent("run.wait.complete", nil)
 	if ui.Enabled() {
-		ui.RenderRunSummaryCards(analysisReport, recommendationReport, topRecommendation)
+		renderOptimizationV2Summary(stdout, optimizationReport)
 		proxySaturation := "false"
 		if analysisReport != nil && analysisReport.CurrentLoadSummary != nil && strings.TrimSpace(analysisReport.CurrentLoadSummary.SaturationSource) == "approximate" {
 			proxySaturation = "true"
 		}
 		recordCLIEvent("run.output.premium_cards", map[string]string{
-			"recommendation_report_available": fmt.Sprintf("%t", recommendationReport != nil),
+			"recommendation_report_available": fmt.Sprintf("%t", optimizationReport != nil),
 			"proxy_saturation":                proxySaturation,
 		})
 	}
-
-	topIssue := topIssueSummary(analysisReport)
-	if summary := strings.TrimSpace(topRecommendation.TopIssue); summary != "" {
-		topIssue = summary
-	}
-	topRecommendationSummaryLine := topRecommendationSummary(recommendationReport)
-	if summary := strings.TrimSpace(topRecommendation.TopRecommendation); summary != "" {
-		topRecommendationSummaryLine = summary
-	}
-	fmt.Fprintf(stdout, "Top issue: %s\n", topIssue)
-	fmt.Fprintf(stdout, "Top recommendation: %s\n", topRecommendationSummaryLine)
-	if alternativeSummary := alternativeStrategySummary(recommendationReport); alternativeSummary != "" {
-		fmt.Fprintf(stdout, "Alternative path: %s\n", alternativeSummary)
-	}
-	for _, line := range currentLoadSummaryLines(analysisReport, topRecommendation.CapacityOpportunity) {
-		fmt.Fprintln(stdout, line)
+	if !ui.Enabled() {
+		renderOptimizationV2Summary(stdout, optimizationReport)
 	}
 	fmt.Fprintf(stdout, "For further details, see dashboard: %s\n", dashboardURL)
 
@@ -309,10 +295,10 @@ func printRunUsage(w io.Writer) {
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "run performs:")
 	fmt.Fprintln(w, "  1) collect locally")
-	fmt.Fprintln(w, "  2) POST /api/v1/trigger-job to backend")
-	fmt.Fprintln(w, "  3) wait for analysis + recommendation completion")
-	fmt.Fprintln(w, "  4) print top issue + top recommendation")
-	fmt.Fprintln(w, "  5) open dashboard /jobs/{job_id} in browser")
+	fmt.Fprintln(w, "  2) POST /api/v1/optimizations to backend")
+	fmt.Fprintln(w, "  3) wait for analysis + optimization report completion")
+	fmt.Fprintln(w, "  4) print the decision-oriented optimization summary")
+	fmt.Fprintln(w, "  5) open dashboard /optimizations/{id} in browser")
 	fmt.Fprintln(w, "")
 	fmt.Fprintf(w, "Environment:\n  %s=<base URL> (default: %s)\n", inferleanBaseURLEnv, defaultInferleanBaseURL)
 	fmt.Fprintf(w, "  %s=<bearer token> (optional, used for authenticated backend routes)\n", inferleanAuthTokenEnv)
@@ -365,7 +351,7 @@ func resolveInferleanBaseURL(raw string) (string, error) {
 }
 
 func triggerJob(baseURL string, collectorPayload []byte, authToken string) (*triggerJobAPIResponse, error) {
-	endpoint := strings.TrimRight(baseURL, "/") + "/api/v1/trigger-job"
+	endpoint := strings.TrimRight(baseURL, "/") + "/api/v1/optimizations"
 	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(collectorPayload))
 	if err != nil {
 		return nil, fmt.Errorf("build trigger request: %w", err)
@@ -412,6 +398,73 @@ func triggerJob(baseURL string, collectorPayload []byte, authToken string) (*tri
 	}
 	out.ID = resolvedID
 	return &out, nil
+}
+
+func waitForOptimizationCompletion(baseURL, jobID, authToken string, progressCallback func(waitProgressUpdate)) (*model.AnalysisReport, *model.OptimizationReportV2, error) {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return nil, nil, errors.New("job id is required")
+	}
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		return nil, nil, errors.New("base url is required")
+	}
+	deadline := time.Now().Add(runPollTimeout)
+	analysisURL := fmt.Sprintf("%s/api/v1/jobs/%s/analysis", baseURL, url.PathEscape(jobID))
+	reportURL := fmt.Sprintf("%s/api/v1/optimizations/%s/report", baseURL, url.PathEscape(jobID))
+	var analysis model.AnalysisReport
+	if err := waitForArtifact(
+		analysisURL,
+		authToken,
+		deadline,
+		defaultAnalysisETA,
+		&analysis,
+		func(progress float64, elapsed, eta time.Duration, done bool) {
+			if progressCallback == nil {
+				return
+			}
+			progressCallback(waitProgressUpdate{
+				Stage:    waitStageAnalysis,
+				Progress: progress,
+				Elapsed:  elapsed,
+				ETA:      eta,
+				Done:     done,
+			})
+		},
+	); err != nil {
+		if errors.Is(err, errArtifactWaitTimeout) {
+			return nil, nil, fmt.Errorf("timed out waiting for optimization report for job %s", jobID)
+		}
+		return nil, nil, fmt.Errorf("fetch analysis: %w", err)
+	}
+
+	var report model.OptimizationReportV2
+	if err := waitForArtifact(
+		reportURL,
+		authToken,
+		deadline,
+		defaultRecommendationETA,
+		&report,
+		func(progress float64, elapsed, eta time.Duration, done bool) {
+			if progressCallback == nil {
+				return
+			}
+			progressCallback(waitProgressUpdate{
+				Stage:    waitStageRecommendation,
+				Progress: progress,
+				Elapsed:  elapsed,
+				ETA:      eta,
+				Done:     done,
+			})
+		},
+	); err != nil {
+		if errors.Is(err, errArtifactWaitTimeout) {
+			return nil, nil, fmt.Errorf("timed out waiting for optimization report for job %s", jobID)
+		}
+		return nil, nil, fmt.Errorf("fetch optimization report: %w", err)
+	}
+
+	return &analysis, &report, nil
 }
 
 func waitForJobCompletion(baseURL, jobID, authToken string, progressCallback func(waitProgressUpdate)) (*model.AnalysisReport, *model.RecommendationReport, *topRecommendationAPIResponse, error) {

@@ -359,21 +359,21 @@ func TestAnalyzeWritesSlimReport(t *testing.T) {
 	if strings.Contains(string(data), "\"telemetry_samples\"") {
 		t.Fatalf("expected slim analyzer output without telemetry_samples, got %s", string(data))
 	}
-	var report model.AnalysisReport
+	var report model.AnalysisReportV2
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatalf("unmarshal analysis report: %v", err)
 	}
-	if report.AnalysisSummary == nil {
-		t.Fatalf("expected analysis summary")
+	if len(report.Findings) == 0 {
+		t.Fatalf("expected findings in v2 analysis report")
 	}
-	if report.FeatureSummary == nil || report.FeatureSummary.GenerationTokensDelta <= 0 {
-		t.Fatalf("expected persisted feature summary, got %+v", report.FeatureSummary)
+	if report.OperatingPoint.ThroughputTokensPerSecond == nil && report.OperatingPoint.RequestRateRPS == nil {
+		t.Fatalf("expected operating point in v2 analysis report")
 	}
-	if report.CurrentLoadSummary == nil {
-		t.Fatalf("expected current_load_summary in analyzer output")
+	if report.PressureSummary.DominantBottleneck == "" {
+		t.Fatalf("expected pressure summary in v2 analysis report")
 	}
-	if len(report.CurrentVLLMConfigurations) == 0 {
-		t.Fatalf("expected current_vllm_configurations in analyzer output")
+	if len(report.Configuration) == 0 {
+		t.Fatalf("expected configuration in v2 analysis report")
 	}
 }
 
@@ -444,12 +444,12 @@ func TestAnalyzeAcceptsIntentFileAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read report: %v", err)
 	}
-	var report model.AnalysisReport
+	var report model.AnalysisReportV2
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatalf("unmarshal analysis report: %v", err)
 	}
-	if report.WorkloadProfile == nil || report.WorkloadProfile.Objective != "latency_first" || report.WorkloadProfile.Source != model.WorkloadProfileSourceUserInput {
-		t.Fatalf("expected analyze to load intent file as workload profile, got %+v", report.WorkloadProfile)
+	if report.Workload.DeclaredIntent == nil || report.Workload.DeclaredIntent.Objective != "latency_first" || report.Workload.DeclaredIntent.Source != model.WorkloadProfileSourceUserInput {
+		t.Fatalf("expected analyze to load intent file as workload profile, got %+v", report.Workload.DeclaredIntent)
 	}
 }
 
@@ -558,24 +558,21 @@ func TestRecommendWritesAbsoluteReport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read report: %v", err)
 	}
-	var report model.RecommendationReport
+	var report model.OptimizationReportV2
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatalf("unmarshal recommendation report: %v", err)
 	}
-	if report.MatchedCorpusProfile == nil {
-		t.Fatalf("expected matched corpus profile")
+	if report.RecommendationBasis.MatchedBenchmark == nil {
+		t.Fatalf("expected matched benchmark profile")
 	}
-	if report.ScenarioPrediction == nil {
-		t.Fatalf("expected scenario prediction in recommendation output")
+	if report.Scenarios.RecommendedDecision.ProjectedOperatingPoint == nil {
+		t.Fatalf("expected projected operating point in optimization output")
 	}
-	if len(report.ScenarioOptions) < 4 {
-		t.Fatalf("expected scenario options in recommendation output, got %+v", report.ScenarioOptions)
+	if report.Scenarios.ThroughputFirst.Slot == "" || report.Scenarios.LatencyFirst.Slot == "" || report.Scenarios.Balanced.Slot == "" {
+		t.Fatalf("expected all scenario slots in optimization output, got %+v", report.Scenarios)
 	}
-	if report.CapacityOpportunity == nil {
-		t.Fatalf("expected capacity opportunity in recommendation output")
-	}
-	if len(report.Recommendations) == 0 {
-		t.Fatalf("expected recommendation output")
+	if report.PrimaryDecision.Kind == "" {
+		t.Fatalf("expected primary decision in optimization output")
 	}
 }
 
@@ -596,7 +593,7 @@ func TestRunCollectsTriggersAndOpensDashboard(t *testing.T) {
 	recommendationCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/trigger-job":
+		case "/api/v1/optimizations":
 			if r.Method != http.MethodPost {
 				t.Fatalf("expected POST, got %s", r.Method)
 			}
@@ -637,7 +634,7 @@ func TestRunCollectsTriggersAndOpensDashboard(t *testing.T) {
 					]
 				}
 			}`))
-		case "/api/v1/jobs/123/top-recommendation":
+		case "/api/v1/optimizations/123/report":
 			if r.Method != http.MethodGet {
 				t.Fatalf("expected GET, got %s", r.Method)
 			}
@@ -645,39 +642,32 @@ func TestRunCollectsTriggersAndOpensDashboard(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			if recommendationCalls < 2 {
 				w.WriteHeader(http.StatusAccepted)
-				_, _ = w.Write([]byte(`{"job_id":"123","artifact":"top_recommendation","status":"pending"}`))
+				_, _ = w.Write([]byte(`{"job_id":"123","artifact":"report","status":"pending"}`))
 				return
 			}
 			_, _ = w.Write([]byte(`{
-				"job_id":"123",
-				"id":"123",
-				"top_issue":"Queue-heavy TTFT hurts responsiveness",
-				"top_recommendation":"Increase max_num_seqs to reduce queueing.",
-				"gpu_capacity_headroom":{
-					"recoverable_gpu_load_pct": 18,
-					"recoverable_gpu_count": 0.7
-				}
-			}`))
-		case "/api/v1/jobs/123/recommendation":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{
-				"schema_version":"recommendation/v3",
-				"strategy_options":[
-					{
-						"id":"throughput_push",
-						"label":"Throughput Push",
-						"objective":"throughput_first",
-						"recommended":true,
-						"summary":"Increase max_num_seqs to reduce queueing."
-					},
-					{
-						"id":"latency_guardrail",
-						"label":"Latency Guardrail",
-						"objective":"latency_first",
-						"recommended":false,
-						"summary":"Reduce chunked prefill budget to protect TTFT."
-					}
-				]
+				"metadata":{"schema_version":"optimization/v2","report_kind":"optimization","generated_at":"2026-03-25T10:00:00Z","tool_name":"InferLean","tool_version":"dev","id":"123","status":"completed"},
+				"workload":{"objective_mode":"balanced","multimodal":false},
+				"operating_point":{"request_rate_rps":7.5,"latency":{"p50_ms":700,"p95_ms":1200,"queue_wait_ms":420},"concurrency":{},"gpu":{},"host":{},"multimodal":false,"source_type":"mixed"},
+				"pressure_summary":{
+					"dominant_bottleneck":"queue",
+					"compute":{"pressure_status":"moderate","confidence":0.8,"source_type":"measured","summary":"Compute pressure is elevated."},
+					"memory_bandwidth":{"pressure_status":"low","confidence":0.7,"source_type":"measured","summary":"Memory bandwidth is not dominant."},
+					"kv_cache":{"pressure_status":"low","confidence":0.7,"source_type":"mixed","summary":"KV pressure is limited."},
+					"queue":{"pressure_status":"high","confidence":0.92,"source_type":"measured","summary":"Waiting dominates latency."},
+					"host_input_pipeline":{"pressure_status":"low","confidence":0.7,"source_type":"inferred","summary":"Host pressure is not dominant."}
+				},
+				"frontier":{"frontier_proximity":"moderate","frontier_reason":"Software tuning can still reduce queueing."},
+				"primary_decision":{"kind":"apply_config_change","reason":"Useful batching is too low for the observed queue pressure.","confidence":0.88,"confidence_source":"hybrid","primary_mechanism":"reduce_queueing","expected_effect":"Increase throughput while keeping queue wait under control."},
+				"scenarios":{
+					"recommended_decision":{"slot":"recommended_decision","objective_mode":"balanced","evidence_state":"available","decision_kind":"apply_config_change","mechanism":"reduce_queueing","rationale":"Increase useful batching to reduce waiting.","confidence":0.88},
+					"throughput_first":{"slot":"throughput_first","objective_mode":"throughput_first","evidence_state":"available","decision_kind":"apply_config_change","mechanism":"increase_useful_batching","rationale":"Push batching further for throughput.","confidence":0.81},
+					"latency_first":{"slot":"latency_first","objective_mode":"latency_first","evidence_state":"available","decision_kind":"keep_current","mechanism":"keep_current_operating_mode","rationale":"Current settings are safer for latency.","confidence":0.72},
+					"balanced":{"slot":"balanced","objective_mode":"balanced","evidence_state":"available","decision_kind":"apply_config_change","mechanism":"reduce_queueing","rationale":"Moderate batching reduces queueing without chasing max throughput.","confidence":0.88}
+				},
+				"recommendation_basis":{"source":"hybrid","summary":"Rule evidence plus benchmark guidance."},
+				"evidence":{"findings":[]},
+				"access":{"tier":"paid"}
 			}`))
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -722,33 +712,18 @@ func TestRunCollectsTriggersAndOpensDashboard(t *testing.T) {
 		t.Fatalf("expected collector schema_version collector/v1, got %q", got)
 	}
 
-	expectedDashboard := server.URL + "/jobs/123"
+	expectedDashboard := server.URL + "/optimizations/123"
 	if opened != expectedDashboard {
 		t.Fatalf("expected browser open target %q, got %q", expectedDashboard, opened)
 	}
 	if !strings.Contains(stdout.String(), "Job queued: 123") {
 		t.Fatalf("expected stdout to include job id, got %q", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "Top issue: Queue-heavy TTFT hurts responsiveness") {
-		t.Fatalf("expected stdout to include top issue summary, got %q", stdout.String())
+	if !strings.Contains(stdout.String(), "Verdict") || !strings.Contains(stdout.String(), "Apply config change") {
+		t.Fatalf("expected stdout to include v2 verdict summary, got %q", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "Top recommendation: Increase max_num_seqs to reduce queueing.") {
-		t.Fatalf("expected stdout to include top recommendation summary, got %q", stdout.String())
-	}
-	if !strings.Contains(stdout.String(), "Alternative path: Reduce chunked prefill budget to protect TTFT.") {
-		t.Fatalf("expected stdout to include alternative path summary, got %q", stdout.String())
-	}
-	if !strings.Contains(stdout.String(), "Current saturation: 84.0%") {
-		t.Fatalf("expected stdout to include current saturation, got %q", stdout.String())
-	}
-	if !strings.Contains(stdout.String(), "Current GPU utilization (sample average): 72.0% (2.9 / 4.0 GPUs)") {
-		t.Fatalf("expected stdout to include current gpu load, got %q", stdout.String())
-	}
-	if !strings.Contains(stdout.String(), "Load bottleneck: GPU compute bound") {
-		t.Fatalf("expected stdout to include load bottleneck, got %q", stdout.String())
-	}
-	if !strings.Contains(stdout.String(), "Recoverable capacity: 18.0% (0.7 GPUs)") {
-		t.Fatalf("expected stdout to include recoverable capacity, got %q", stdout.String())
+	if !strings.Contains(stdout.String(), "Dominant bottleneck") || !strings.Contains(stdout.String(), "Queue") {
+		t.Fatalf("expected stdout to include dominant bottleneck, got %q", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "For further details, see dashboard: "+expectedDashboard) {
 		t.Fatalf("expected stdout to include dashboard URL %q, got %q", expectedDashboard, stdout.String())
@@ -759,7 +734,7 @@ func TestRunContinuesAfterInterruptDuringCollection(t *testing.T) {
 	var receivedCollector map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/trigger-job":
+		case "/api/v1/optimizations":
 			if r.Method != http.MethodPost {
 				t.Fatalf("expected POST, got %s", r.Method)
 			}
@@ -772,11 +747,20 @@ func TestRunContinuesAfterInterruptDuringCollection(t *testing.T) {
 		case "/api/v1/jobs/123/analysis":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"schema_version":"v3","diagnosis_summary":{"findings":[]}}`))
-		case "/api/v1/jobs/123/top-recommendation":
+		case "/api/v1/optimizations/123/report":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"job_id":"123","id":"123","top_recommendation":"Use partial sample tuning."}`))
-		case "/api/v1/jobs/123/recommendation":
-			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{
+  "metadata":{"schema_version":"optimization/v2","report_kind":"optimization","generated_at":"2026-03-25T10:00:00Z","tool_name":"InferLean","tool_version":"dev","id":"123","status":"completed"},
+  "workload":{"objective_mode":"balanced","multimodal":false},
+  "operating_point":{"request_rate_rps":5,"latency":{"p50_ms":410,"p95_ms":410,"queue_wait_ms":0},"concurrency":{},"gpu":{},"host":{},"multimodal":false,"source_type":"mixed"},
+  "pressure_summary":{"dominant_bottleneck":"insufficient_evidence","compute":{"pressure_status":"insufficient_evidence","confidence":0.2,"source_type":"inferred","summary":"Not enough evidence."},"memory_bandwidth":{"pressure_status":"insufficient_evidence","confidence":0.2,"source_type":"inferred","summary":"Not enough evidence."},"kv_cache":{"pressure_status":"insufficient_evidence","confidence":0.2,"source_type":"inferred","summary":"Not enough evidence."},"queue":{"pressure_status":"low","confidence":0.6,"source_type":"measured","summary":"Queueing is low."},"host_input_pipeline":{"pressure_status":"low","confidence":0.6,"source_type":"inferred","summary":"Host pressure is limited."}},
+  "frontier":{"frontier_proximity":"unknown","frontier_reason":"Partial sample only."},
+  "primary_decision":{"kind":"keep_current","reason":"Partial sample suggests no urgent change.","confidence":0.51,"confidence_source":"limited_evidence","primary_mechanism":"keep_current_operating_mode","expected_effect":"Use partial sample tuning."},
+  "scenarios":{"recommended_decision":{"slot":"recommended_decision","objective_mode":"balanced","evidence_state":"preview","decision_kind":"keep_current","mechanism":"keep_current_operating_mode","rationale":"Use partial sample tuning.","confidence":0.51},"throughput_first":{"slot":"throughput_first","objective_mode":"throughput_first","evidence_state":"preview","decision_kind":"keep_current","mechanism":"keep_current_operating_mode","rationale":"Use partial sample tuning.","confidence":0.51},"latency_first":{"slot":"latency_first","objective_mode":"latency_first","evidence_state":"preview","decision_kind":"keep_current","mechanism":"keep_current_operating_mode","rationale":"Use partial sample tuning.","confidence":0.51},"balanced":{"slot":"balanced","objective_mode":"balanced","evidence_state":"preview","decision_kind":"keep_current","mechanism":"keep_current_operating_mode","rationale":"Use partial sample tuning.","confidence":0.51}},
+  "recommendation_basis":{"source":"analysis_only","summary":"Partial sample only."},
+  "evidence":{"findings":[]},
+  "access":{"tier":"free","redactions":["exact_knob_deltas"]}
+}`))
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -871,8 +855,8 @@ func TestRunContinuesAfterInterruptDuringCollection(t *testing.T) {
 	if got := strings.TrimSpace(fmt.Sprint(receivedCollector["schema_version"])); got != "collector/v1" {
 		t.Fatalf("expected collector schema_version collector/v1, got %q", got)
 	}
-	if !strings.Contains(stdout.String(), "Top recommendation: Use partial sample tuning.") {
-		t.Fatalf("expected top recommendation in output, got %q", stdout.String())
+	if !strings.Contains(stdout.String(), "Use partial sample tuning.") {
+		t.Fatalf("expected optimization summary in output, got %q", stdout.String())
 	}
 	if !openCalled {
 		t.Fatalf("expected browser open to be attempted")
@@ -893,7 +877,7 @@ func TestRunRendersPremiumCardsWhenTerminalUIEnabled(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/trigger-job":
+		case "/api/v1/optimizations":
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
 			_, _ = w.Write([]byte(`{"job_id":"123","status":"queued"}`))
@@ -928,31 +912,19 @@ func TestRunRendersPremiumCardsWhenTerminalUIEnabled(t *testing.T) {
     ]
   }
 }`))
-		case "/api/v1/jobs/123/top-recommendation":
+		case "/api/v1/optimizations/123/report":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{
-  "job_id":"123",
-  "id":"123",
-  "top_issue":"Queue-heavy TTFT hurts responsiveness",
-  "top_recommendation":"Increase max_num_seqs to reduce queueing.",
-  "gpu_capacity_headroom":{"recoverable_gpu_load_pct":18,"recoverable_gpu_count":0.7}
-}`))
-		case "/api/v1/jobs/123/recommendation":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{
-  "schema_version":"recommendation/v1",
-  "declared_intent":{"value":"latency_first","source":"intent_file"},
-  "guardrail_policy":{"min_throughput_retention_pct":80},
-  "gpu_capacity_headroom":{"recoverable_gpu_load_pct":18,"recoverable_gpu_count":0.7},
-  "recommended_action":{"summary":"Apply benchmark-backed tuning: max_num_batched_tokens=4096, max_num_seqs=256","confidence":0.92},
-  "expected_impact":{
-    "request_rate_rps":{"after":12.77,"delta_pct":204.1},
-    "request_latency_ms":{"p50":{"after":1520,"delta_pct":-15.6}},
-    "gpu_utilization_pct":{"after":44,"delta_pct":83.3}
-  },
-  "strategy_options":[
-    {"id":"primary","recommended":true,"summary":"Increase max_num_seqs to reduce queueing."}
-  ]
+  "metadata":{"schema_version":"optimization/v2","report_kind":"optimization","generated_at":"2026-03-25T10:00:00Z","tool_name":"InferLean","tool_version":"dev","id":"123","status":"completed"},
+  "workload":{"objective_mode":"balanced","multimodal":false},
+  "operating_point":{"request_rate_rps":7.5,"latency":{"p50_ms":700,"p95_ms":1200,"queue_wait_ms":420},"concurrency":{},"gpu":{},"host":{},"multimodal":false,"source_type":"mixed"},
+  "pressure_summary":{"dominant_bottleneck":"queue","compute":{"pressure_status":"moderate","confidence":0.8,"source_type":"measured","summary":"Compute pressure is elevated."},"memory_bandwidth":{"pressure_status":"low","confidence":0.7,"source_type":"measured","summary":"Memory bandwidth is limited."},"kv_cache":{"pressure_status":"low","confidence":0.7,"source_type":"mixed","summary":"KV pressure is limited."},"queue":{"pressure_status":"high","confidence":0.92,"source_type":"measured","summary":"Queueing dominates tail latency."},"host_input_pipeline":{"pressure_status":"low","confidence":0.7,"source_type":"inferred","summary":"Host pressure is not dominant."}},
+  "frontier":{"frontier_proximity":"moderate","frontier_reason":"Queue pressure leaves software headroom."},
+  "primary_decision":{"kind":"apply_config_change","reason":"Useful batching is too low for the observed queue pressure.","confidence":0.92,"confidence_source":"hybrid","primary_mechanism":"reduce_queueing","expected_effect":"Increase throughput while keeping queue wait under control.","exact_knob_deltas":[{"name":"max_num_seqs","current_value":8,"recommended_value":16}]},
+  "scenarios":{"recommended_decision":{"slot":"recommended_decision","objective_mode":"balanced","evidence_state":"available","decision_kind":"apply_config_change","mechanism":"reduce_queueing","rationale":"Increase max_num_seqs to reduce queueing.","confidence":0.92},"throughput_first":{"slot":"throughput_first","objective_mode":"throughput_first","evidence_state":"available","decision_kind":"apply_config_change","mechanism":"increase_useful_batching","rationale":"Increase max_num_seqs to reduce queueing.","confidence":0.92},"latency_first":{"slot":"latency_first","objective_mode":"latency_first","evidence_state":"available","decision_kind":"keep_current","mechanism":"keep_current_operating_mode","rationale":"Protect TTFT under the current latency guardrail.","confidence":0.71},"balanced":{"slot":"balanced","objective_mode":"balanced","evidence_state":"available","decision_kind":"apply_config_change","mechanism":"reduce_queueing","rationale":"Increase max_num_seqs to reduce queueing.","confidence":0.92}},
+  "recommendation_basis":{"source":"hybrid","summary":"Benchmark-backed tuning."},
+  "evidence":{"findings":[]},
+  "access":{"tier":"paid"}
 }`))
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -1004,14 +976,12 @@ func TestRunRendersPremiumCardsWhenTerminalUIEnabled(t *testing.T) {
 
 	rendered := stdout.String()
 	for _, want := range []string{
-		"Saturation",
-		"Observed Traffic",
-		"GPU compute 84%, GPU bandwidth 55%, CPU 70%",
-		"GPU Load Headroom",
-		"Target Goal",
-		"Best Action",
-		"Expected Impact",
-		"Increase max_num_seqs to reduce queueing.",
+		"Verdict",
+		"Apply config change",
+		"Best next move",
+		"Alternatives",
+		"Exact changes",
+		"max_num_seqs: 8 -> 16",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("expected premium run output to include %q, got %q", want, rendered)

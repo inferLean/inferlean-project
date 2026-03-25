@@ -54,6 +54,16 @@ var findingNarratives = map[string]findingNarrative{
 		technical: "CPU-side scheduling, tokenization, transport, or input processing appears to be gating GPU work, so the accelerator cannot stay fully occupied.",
 		impact:    "Host pressure throttles throughput before the GPU saturates and can also inflate TTFT through scheduler delay.",
 	},
+	detectorMultimodalPreprocessingCPUBottleneck: {
+		stage:     "multimodal",
+		technical: "Multimodal request preparation appears to be consuming substantial host CPU time before GPU execution, so image or media preprocessing is likely gating serving throughput.",
+		impact:    "CPU-side media preprocessing can inflate end-to-end latency and keep GPU pressure deceptively low even when the node feels slow to operators.",
+	},
+	detectorMultimodalCacheIneffective: {
+		stage:     "multimodal",
+		technical: "The multimodal processor cache is seeing enough query volume to matter, but hit rate remains low, which points to repeated image or media work not being reused effectively.",
+		impact:    "Repeated decode, resize, and normalization work burns host capacity and adds latency that could often be avoided with stable cache keys or upstream preprocessing reuse.",
+	},
 	detectorGPUMemorySaturation: {
 		stage:     "memory",
 		technical: "Framebuffer usage is already high even though useful compute throughput is not, which suggests memory footprint rather than compute is constraining batching efficiency.",

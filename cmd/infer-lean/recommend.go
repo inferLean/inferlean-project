@@ -15,6 +15,7 @@ import (
 
 	"github.com/inferLean/inferlean-project/internal/analyzer"
 	"github.com/inferLean/inferlean-project/internal/model"
+	"github.com/inferLean/inferlean-project/internal/optimization"
 	"github.com/inferLean/inferlean-project/internal/recommender"
 )
 
@@ -58,6 +59,7 @@ func runAnalyze(args []string, stdout, stderr io.Writer) error {
 	intentPath := fs.String("intent-file", "", "")
 	plainOutput := fs.Bool("plain-output", false, "")
 	llmEnhance := fs.Bool("llm-enhance", false, "")
+	format := fs.String("format", "human", "")
 
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, "Usage: inferLean analyze [flags]")
@@ -69,6 +71,7 @@ func runAnalyze(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stderr, "  --workload-profile-file <path> Optional workload profile override")
 		fmt.Fprintln(stderr, "  --intent-file <path>           Optional declared-intent JSON override (same schema as workload-profile)")
 		fmt.Fprintln(stderr, "  --plain-output                 Disable styled terminal output and print only the report path")
+		fmt.Fprintln(stderr, "  --format <value>               human or json (default: human)")
 		fmt.Fprintln(stderr, "  --llm-enhance                  Add optional llm_enhanced output when env vars are configured")
 	}
 
@@ -104,20 +107,25 @@ func runAnalyze(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	slimAnalysisReport(report)
+	reportV2 := optimization.ComposeAnalysisReportV2(report, optimization.ComposeOptions{})
 
 	absOutput, err := filepath.Abs(*outputPath)
 	if err != nil {
 		return err
 	}
-	if err := analyzer.SaveJSON(absOutput, report); err != nil {
+	if err := analyzer.SaveJSON(absOutput, reportV2); err != nil {
 		return err
 	}
 	recordCLIEvent("analyze.complete", nil)
+	if strings.EqualFold(strings.TrimSpace(*format), "json") {
+		recordCLIEvent("analyze.output.json", nil)
+		return writeJSONReport(stdout, reportV2)
+	}
 	if ui.Enabled() {
 		if report.CurrentLoadSummary != nil && strings.TrimSpace(report.CurrentLoadSummary.SaturationSource) == "approximate" {
 			recordCLIEvent("analyze.output.proxy_utilization", nil)
 		}
-		ui.RenderAnalyzeSummaryCard(report)
+		renderAnalysisV2Summary(stdout, reportV2)
 	} else {
 		fmt.Fprintln(stdout, absOutput)
 	}
@@ -132,8 +140,11 @@ func runRecommend(args []string, stdout, stderr io.Writer) error {
 	analysisPath := fs.String("analysis-file", "analysis-report.json", "")
 	corpusPath := fs.String("corpus-file", "", "")
 	objective := fs.String("objective", "", "")
+	targetP95Latency := fs.Float64("target-p95-latency", 0, "")
+	minThroughput := fs.Float64("min-throughput", 0, "")
 	plainOutput := fs.Bool("plain-output", false, "")
 	llmEnhance := fs.Bool("llm-enhance", false, "")
+	format := fs.String("format", "human", "")
 	var scenarioSet setFlags
 	fs.Var(&scenarioSet, "set", "")
 
@@ -144,8 +155,11 @@ func runRecommend(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stderr, "  --output <path>         Write the recommendation JSON to this path (default: recommendation-report.json)")
 		fmt.Fprintln(stderr, "  --analysis-file <path>  Analyzer report JSON to consume (default: analysis-report.json)")
 		fmt.Fprintln(stderr, "  --corpus-file <path>    Optional local benchmark corpus JSON file used for calibration")
-		fmt.Fprintln(stderr, "  --objective <value>     balanced, throughput_first, or latency_first (default: workload profile or balanced)")
+		fmt.Fprintln(stderr, "  --objective <value>     throughput, latency, or balanced (default: workload profile or balanced)")
+		fmt.Fprintln(stderr, "  --target-p95-latency    Optional p95 latency guardrail in ms")
+		fmt.Fprintln(stderr, "  --min-throughput        Optional minimum throughput guardrail")
 		fmt.Fprintln(stderr, "  --set key=value         Explicit what-if parameter override (repeatable)")
+		fmt.Fprintln(stderr, "  --format <value>        human or json (default: human)")
 		fmt.Fprintln(stderr, "  --plain-output          Disable styled terminal output and print only the report path")
 		fmt.Fprintln(stderr, "  --llm-enhance           Add optional llm_enhanced output when env vars are configured")
 	}
@@ -178,29 +192,42 @@ func runRecommend(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	analysisReport, readErr := loadAnalysisReportForUI(cleanAnalysisPath)
+	if readErr != nil {
+		return readErr
+	}
+	var constraint *model.ConstraintV2
+	if *targetP95Latency > 0 || *minThroughput > 0 {
+		constraint = &model.ConstraintV2{}
+		if *targetP95Latency > 0 {
+			value := *targetP95Latency
+			constraint.TargetP95LatencyMS = &value
+		}
+		if *minThroughput > 0 {
+			value := *minThroughput
+			constraint.MinThroughput = &value
+		}
+	}
+	reportV2 := optimization.ComposeOptimizationReportV2(analysisReport, report, optimization.ComposeOptions{
+		ObjectiveMode: strings.TrimSpace(*objective),
+		Constraint:    constraint,
+		AccessTier:    model.AccessTierPaid,
+	})
 
 	absOutput, err := filepath.Abs(*outputPath)
 	if err != nil {
 		return err
 	}
-	if err := analyzer.SaveJSON(absOutput, report); err != nil {
+	if err := analyzer.SaveJSON(absOutput, reportV2); err != nil {
 		return err
 	}
 	recordCLIEvent("recommend.complete", nil)
+	if strings.EqualFold(strings.TrimSpace(*format), "json") {
+		recordCLIEvent("recommend.output.json", nil)
+		return writeJSONReport(stdout, reportV2)
+	}
 	if ui.Enabled() {
-		analysisReport, readErr := loadAnalysisReportForUI(cleanAnalysisPath)
-		if readErr == nil {
-			snapshot := buildRecommendationSnapshot(analysisReport, report)
-			if !recommendationSnapshotEmpty(snapshot) {
-				ui.renderRecommendationSummaryCard(snapshot)
-			} else {
-				recordCLIEvent("recommend.output.path_fallback", nil)
-				fmt.Fprintln(stdout, absOutput)
-			}
-		} else {
-			recordCLIEvent("recommend.output.path_fallback", nil)
-			fmt.Fprintln(stdout, absOutput)
-		}
+		renderOptimizationV2Summary(stdout, reportV2)
 	} else {
 		fmt.Fprintln(stdout, absOutput)
 	}

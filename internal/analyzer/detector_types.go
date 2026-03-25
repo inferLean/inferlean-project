@@ -24,6 +24,8 @@ const (
 	detectorPrefillHeavyWorkload                  = "prefill_heavy_workload"
 	detectorDecodeBoundGeneration                 = "decode_bound_generation"
 	detectorCPUOrHostBottleneck                   = "cpu_or_host_bottleneck"
+	detectorMultimodalPreprocessingCPUBottleneck  = "multimodal_preprocessing_cpu_bottleneck"
+	detectorMultimodalCacheIneffective            = "multimodal_cache_ineffective"
 	detectorGPUMemorySaturation                   = "gpu_memory_saturation_without_throughput"
 	detectorGPUHardwareInstability                = "gpu_hardware_instability"
 	detectorTextOnlyOnMultimodalStack             = "text_only_workload_on_multimodal_stack"
