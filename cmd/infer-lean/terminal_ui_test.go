@@ -104,6 +104,21 @@ func TestBuildRecommendationSnapshotSuppressesLowConfidenceAction(t *testing.T) 
 	}
 }
 
+func TestBuildRecommendationSnapshotFallsBackToObjectiveWhenDeclaredGoalMissing(t *testing.T) {
+	recommendation := &model.RecommendationReport{
+		Objective: "balanced",
+		Guardrail: &model.GuardrailSummary{
+			MinThroughputRetentionPct: ptr(85),
+		},
+	}
+
+	snapshot := buildRecommendationSnapshot(nil, recommendation)
+
+	if snapshot.TargetGoal != "Balanced | keep throughput >= 85% of current" {
+		t.Fatalf("expected objective fallback summary, got %q", snapshot.TargetGoal)
+	}
+}
+
 func TestBuildRunRecommendationSnapshotFallsBackToTopRecommendation(t *testing.T) {
 	snapshot := buildRunRecommendationSnapshot(nil, nil, &topRecommendationAPIResponse{
 		TopRecommendation: "Apply sample-backed queue tuning.",
@@ -217,6 +232,42 @@ func TestRenderAnalyzeSummaryCardUsesCompactPremiumRows(t *testing.T) {
 	}
 	if strings.Contains(rendered, "Recoverable Capacity") {
 		t.Fatalf("expected analyzer card to omit recommender-only capacity, got %q", rendered)
+	}
+}
+
+func TestRenderAnalyzeSummaryCardLabelsUtilizationProxyAndMissingBandwidth(t *testing.T) {
+	report := &model.AnalysisReport{
+		ServiceSummary: &model.ServiceSummary{
+			SaturationPct:                ptr(97),
+			EstimatedUpperRequestRateRPS: nil,
+		},
+		CurrentLoadSummary: &model.CurrentLoadSummary{
+			DominantGPUResource:          "compute",
+			ComputeLoadPct:               97,
+			ComputeLoadSource:            "gpu_utilization_proxy",
+			MemoryBandwidthLoadPct:       0,
+			MemoryBandwidthLoadAvailable: false,
+			SaturationSource:             "gpu_utilization_proxy",
+			CPULoadPct:                   1,
+		},
+	}
+
+	var out bytes.Buffer
+	ui := terminalUI{out: &out, enabled: true, color: false}
+	ui.RenderAnalyzeSummaryCard(report)
+
+	rendered := out.String()
+	if !strings.Contains(rendered, "Utilization") {
+		t.Fatalf("expected utilization row label, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "High: 97% GPU busy (utilization proxy)") {
+		t.Fatalf("expected proxy wording in saturation headline, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "GPU busy 97% (utilization proxy), GPU bandwidth N/A, CPU 1%") {
+		t.Fatalf("expected missing bandwidth to render as N/A, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Real GPU compute and bandwidth counters were unavailable") || !strings.Contains(rendered, "not measured saturation.") {
+		t.Fatalf("expected proxy saturation warning, got %q", rendered)
 	}
 }
 

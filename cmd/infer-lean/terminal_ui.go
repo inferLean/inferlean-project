@@ -36,12 +36,14 @@ type terminalProgressBar struct {
 }
 
 type analysisSnapshot struct {
+	LoadLabel           string
 	Traffic             string
 	Queue               string
 	QueueTone           string
 	Saturation          string
 	SaturationTone      string
 	SaturationBreakdown *saturationBreakdown
+	SaturationWarning   string
 	Bottleneck          string
 	ObservedTraffic     string
 	ObservedBehavior    string
@@ -49,9 +51,11 @@ type analysisSnapshot struct {
 }
 
 type saturationBreakdown struct {
-	Compute float64
-	Memory  float64
-	CPU     float64
+	Compute         float64
+	ComputeIsProxy  bool
+	Memory          float64
+	MemoryAvailable bool
+	CPU             float64
 }
 
 type recommendationSnapshot struct {
@@ -238,11 +242,18 @@ func (ui terminalUI) renderAnalysisSummaryCard(snapshot analysisSnapshot) {
 	if !ui.enabled {
 		return
 	}
+	loadLabel := strings.TrimSpace(snapshot.LoadLabel)
+	if loadLabel == "" {
+		loadLabel = "Saturation"
+	}
 	rows := []row{
-		{Label: "Saturation", Value: snapshot.Saturation, Tone: snapshot.SaturationTone},
+		{Label: loadLabel, Value: snapshot.Saturation, Tone: snapshot.SaturationTone},
 	}
 	if snapshot.SaturationBreakdown != nil {
 		rows = append(rows, row{Label: "", Value: ui.renderSaturationBreakdown(*snapshot.SaturationBreakdown), Raw: true})
+	}
+	if strings.TrimSpace(snapshot.SaturationWarning) != "" {
+		rows = append(rows, row{Label: "Warning", Value: snapshot.SaturationWarning, NoTruncate: true})
 	}
 	rows = append(rows, row{Label: "Traffic", Value: snapshot.Traffic})
 	if strings.TrimSpace(snapshot.Queue) != "" {
@@ -370,6 +381,7 @@ func buildAnalysisSnapshot(report *model.AnalysisReport, recommendation *model.R
 	}
 
 	snapshot := analysisSnapshot{
+		LoadLabel:  "Saturation",
 		Traffic:    "N/A",
 		Saturation: "N/A",
 	}
@@ -405,19 +417,23 @@ func buildAnalysisSnapshot(report *model.AnalysisReport, recommendation *model.R
 		label := saturationLabel(*summary.SaturationPct)
 		dominant := "GPU"
 		if report.CurrentLoadSummary != nil {
-			dominant = humanizeDominantResource(report.CurrentLoadSummary.DominantGPUResource)
+			dominant = humanizeDominantResource(report.CurrentLoadSummary)
 			if dominant == "" {
 				dominant = "GPU"
 			}
+			snapshot.LoadLabel = analysisLoadLabel(report.CurrentLoadSummary)
+			snapshot.SaturationWarning = saturationProxyWarning(report.CurrentLoadSummary)
 			if shouldShowSaturationBreakdown(report.CurrentLoadSummary) {
 				snapshot.SaturationBreakdown = &saturationBreakdown{
-					Compute: report.CurrentLoadSummary.ComputeLoadPct,
-					Memory:  report.CurrentLoadSummary.MemoryBandwidthLoadPct,
-					CPU:     report.CurrentLoadSummary.CPULoadPct,
+					Compute:         report.CurrentLoadSummary.ComputeLoadPct,
+					ComputeIsProxy:  report.CurrentLoadSummary.ComputeLoadSource == "gpu_utilization_proxy",
+					Memory:          report.CurrentLoadSummary.MemoryBandwidthLoadPct,
+					MemoryAvailable: memoryBandwidthAvailable(report.CurrentLoadSummary),
+					CPU:             report.CurrentLoadSummary.CPULoadPct,
 				}
 			}
 		}
-		snapshot.Saturation = fmt.Sprintf("%s: %.0f%% %s (avg)", label, *summary.SaturationPct, dominant)
+		snapshot.Saturation = fmt.Sprintf("%s: %.0f%% %s", label, *summary.SaturationPct, dominant)
 		snapshot.Saturation += saturationHeadroomSuffix(summary)
 		snapshot.SaturationTone = saturationTone(*summary.SaturationPct)
 	}
@@ -601,17 +617,40 @@ func humanizeCompactBottleneck(value string) string {
 	}
 }
 
-func humanizeDominantResource(value string) string {
-	switch strings.TrimSpace(value) {
+func humanizeDominantResource(load *model.CurrentLoadSummary) string {
+	if load == nil {
+		return ""
+	}
+	switch strings.TrimSpace(load.DominantGPUResource) {
 	case "compute":
-		return "GPU compute"
+		if strings.TrimSpace(load.ComputeLoadSource) == "gpu_utilization_proxy" {
+			return "GPU busy (utilization proxy)"
+		}
+		return "GPU compute (avg)"
 	case "memory_bandwidth":
-		return "GPU bandwidth"
+		return "GPU bandwidth (avg)"
 	case "tensor":
-		return "Tensor"
+		return "Tensor activity (avg)"
 	default:
 		return ""
 	}
+}
+
+func analysisLoadLabel(load *model.CurrentLoadSummary) string {
+	if load != nil && strings.TrimSpace(load.SaturationSource) == "gpu_utilization_proxy" {
+		return "Utilization"
+	}
+	return "Saturation"
+}
+
+func saturationProxyWarning(load *model.CurrentLoadSummary) string {
+	if load == nil || strings.TrimSpace(load.SaturationSource) != "gpu_utilization_proxy" {
+		return ""
+	}
+	if memoryBandwidthAvailable(load) {
+		return "Real GPU compute counters were unavailable, so this is GPU utilization, not measured compute saturation."
+	}
+	return "Real GPU compute and bandwidth counters were unavailable, so this is GPU utilization, not measured saturation."
 }
 
 func humanizeObjective(value string) string {
@@ -895,8 +934,10 @@ func shouldShowSaturationBreakdown(load *model.CurrentLoadSummary) bool {
 	}
 	values := []float64{
 		clampFloat(load.ComputeLoadPct, 0, 100),
-		clampFloat(load.MemoryBandwidthLoadPct, 0, 100),
 		clampFloat(load.CPULoadPct, 0, 100),
+	}
+	if memoryBandwidthAvailable(load) {
+		values = append(values, clampFloat(load.MemoryBandwidthLoadPct, 0, 100))
 	}
 	maxValue := values[0]
 	minValue := values[0]
@@ -911,10 +952,22 @@ func shouldShowSaturationBreakdown(load *model.CurrentLoadSummary) bool {
 	return maxValue >= 85 || (maxValue-minValue) >= 20
 }
 
+func memoryBandwidthAvailable(load *model.CurrentLoadSummary) bool {
+	return load != nil && (load.MemoryBandwidthLoadAvailable || load.MemoryBandwidthLoadPct > 0)
+}
+
 func (ui terminalUI) renderSaturationBreakdown(b saturationBreakdown) string {
+	computeText := fmt.Sprintf("GPU compute %.0f%%", b.Compute)
+	if b.ComputeIsProxy {
+		computeText = fmt.Sprintf("GPU busy %.0f%% (utilization proxy)", b.Compute)
+	}
+	memoryText := "GPU bandwidth N/A"
+	if b.MemoryAvailable {
+		memoryText = fmt.Sprintf("GPU bandwidth %.0f%%", b.Memory)
+	}
 	parts := []string{
-		ui.renderSeveritySegment(fmt.Sprintf("GPU compute %.0f%%", b.Compute), saturationTone(b.Compute)),
-		ui.renderSeveritySegment(fmt.Sprintf("GPU bandwidth %.0f%%", b.Memory), saturationTone(b.Memory)),
+		ui.renderSeveritySegment(computeText, saturationTone(b.Compute)),
+		ui.renderSeveritySegment(memoryText, saturationTone(b.Memory)),
 		ui.renderSeveritySegment(fmt.Sprintf("CPU %.0f%%", b.CPU), saturationTone(b.CPU)),
 	}
 	return strings.Join(parts, ", ")
@@ -972,10 +1025,20 @@ func formatRecoverableGPUCountCLI(value float64) string {
 }
 
 func targetGoalSummary(report *model.RecommendationReport) string {
-	if report == nil || report.DeclaredGoal == nil {
+	if report == nil {
 		return ""
 	}
-	parts := []string{humanizeTargetGoal(report.DeclaredGoal.Value)}
+	goal := ""
+	if report.DeclaredGoal != nil {
+		goal = strings.TrimSpace(report.DeclaredGoal.Value)
+	}
+	if goal == "" {
+		goal = strings.TrimSpace(report.Objective)
+	}
+	if goal == "" {
+		return ""
+	}
+	parts := []string{humanizeTargetGoal(goal)}
 	if report.Guardrail != nil {
 		guardrail := humanizeGuardrailSummary(report.Guardrail)
 		if guardrail != "" {

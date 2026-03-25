@@ -229,6 +229,60 @@ func TestNormalizeReportBuildsComputeBoundCurrentLoadSummary(t *testing.T) {
 	}
 }
 
+func TestNormalizeReportWarnsWhenSaturationUsesUtilizationProxy(t *testing.T) {
+	report := syntheticReport(12, map[string]float64{
+		"gpu_utilization_pct":                     95,
+		"vllm:num_requests_running":               4,
+		"vllm:num_requests_waiting":               2,
+		"vllm:request_success_total":              100,
+		"vllm:generation_tokens_total":            8000,
+		"vllm:prompt_tokens_total":                4000,
+		"vllm:time_to_first_token_seconds_sum":    50,
+		"vllm:time_to_first_token_seconds_count":  100,
+		"vllm:request_queue_time_seconds_sum":     30,
+		"vllm:request_queue_time_seconds_count":   100,
+		"vllm:request_prefill_time_seconds_sum":   20,
+		"vllm:request_prefill_time_seconds_count": 100,
+		"vllm:request_decode_time_seconds_sum":    35,
+		"vllm:request_decode_time_seconds_count":  100,
+	}, map[string]float64{
+		"gpu_utilization_pct":                     97,
+		"vllm:num_requests_running":               4.2,
+		"vllm:num_requests_waiting":               3,
+		"vllm:request_success_total":              150,
+		"vllm:generation_tokens_total":            12000,
+		"vllm:prompt_tokens_total":                6000,
+		"vllm:time_to_first_token_seconds_sum":    80,
+		"vllm:time_to_first_token_seconds_count":  150,
+		"vllm:request_queue_time_seconds_sum":     55,
+		"vllm:request_queue_time_seconds_count":   150,
+		"vllm:request_prefill_time_seconds_sum":   33,
+		"vllm:request_prefill_time_seconds_count": 150,
+		"vllm:request_decode_time_seconds_sum":    50,
+		"vllm:request_decode_time_seconds_count":  150,
+	})
+
+	normalized := NormalizeReport(report, BalancedIntent)
+	if normalized.CurrentLoadSummary == nil {
+		t.Fatalf("expected current load summary")
+	}
+	if normalized.CurrentLoadSummary.SaturationSource != "gpu_utilization_proxy" {
+		t.Fatalf("expected proxy saturation source, got %+v", normalized.CurrentLoadSummary)
+	}
+	if normalized.CurrentLoadSummary.RealSaturationMetricsAvailable {
+		t.Fatalf("expected real saturation metrics to be unavailable, got %+v", normalized.CurrentLoadSummary)
+	}
+	if normalized.ServiceSummary == nil {
+		t.Fatalf("expected service summary")
+	}
+	if normalized.ServiceSummary.EstimatedUpperRequestRateRPS != nil {
+		t.Fatalf("expected headroom estimate to be suppressed for proxy saturation, got %+v", normalized.ServiceSummary)
+	}
+	if !containsAll(strings.Join(normalized.Warnings, "\n"), "Real GPU saturation metrics unavailable", "GPU utilization as a proxy") {
+		t.Fatalf("expected proxy saturation warning, got %+v", normalized.Warnings)
+	}
+}
+
 func TestBuildCurrentLoadSummaryClassifiesCPUBound(t *testing.T) {
 	report := syntheticReport(92, map[string]float64{
 		"gpu_utilization_pct":                     22,

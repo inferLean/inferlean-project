@@ -264,8 +264,13 @@ func runEndToEnd(args []string, stdout, stderr io.Writer) error {
 	recordCLIEvent("run.wait.complete", nil)
 	if ui.Enabled() {
 		ui.RenderRunSummaryCards(analysisReport, recommendationReport, topRecommendation)
+		proxySaturation := "false"
+		if analysisReport != nil && analysisReport.CurrentLoadSummary != nil && strings.TrimSpace(analysisReport.CurrentLoadSummary.SaturationSource) == "gpu_utilization_proxy" {
+			proxySaturation = "true"
+		}
 		recordCLIEvent("run.output.premium_cards", map[string]string{
 			"recommendation_report_available": fmt.Sprintf("%t", recommendationReport != nil),
+			"proxy_saturation":                proxySaturation,
 		})
 	}
 

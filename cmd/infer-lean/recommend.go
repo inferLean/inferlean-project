@@ -114,6 +114,9 @@ func runAnalyze(args []string, stdout, stderr io.Writer) error {
 	}
 	recordCLIEvent("analyze.complete", nil)
 	if ui.Enabled() {
+		if report.CurrentLoadSummary != nil && strings.TrimSpace(report.CurrentLoadSummary.SaturationSource) == "gpu_utilization_proxy" {
+			recordCLIEvent("analyze.output.proxy_utilization", nil)
+		}
 		ui.RenderAnalyzeSummaryCard(report)
 	} else {
 		fmt.Fprintln(stdout, absOutput)
@@ -187,8 +190,15 @@ func runRecommend(args []string, stdout, stderr io.Writer) error {
 	if ui.Enabled() {
 		analysisReport, readErr := loadAnalysisReportForUI(cleanAnalysisPath)
 		if readErr == nil {
-			ui.RenderRecommendationSummaryCard(analysisReport, report)
+			snapshot := buildRecommendationSnapshot(analysisReport, report)
+			if !recommendationSnapshotEmpty(snapshot) {
+				ui.renderRecommendationSummaryCard(snapshot)
+			} else {
+				recordCLIEvent("recommend.output.path_fallback", nil)
+				fmt.Fprintln(stdout, absOutput)
+			}
 		} else {
+			recordCLIEvent("recommend.output.path_fallback", nil)
 			fmt.Fprintln(stdout, absOutput)
 		}
 	} else {

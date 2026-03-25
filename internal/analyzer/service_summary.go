@@ -69,12 +69,19 @@ func buildServiceSummary(report *model.AnalysisReport, intent WorkloadIntent) *m
 	if observed := observedModeSummary(report, features); observed != nil {
 		summary.ObservedMode = *observed
 	}
-	if summary.RequestRateRPS != nil && summary.SaturationPct != nil && *summary.SaturationPct >= 5 {
+	if summary.RequestRateRPS != nil && summary.SaturationPct != nil && *summary.SaturationPct >= 5 && canEstimateCapacityHeadroom(report) {
 		estimatedUpper := *summary.RequestRateRPS * (100 / *summary.SaturationPct)
 		summary.EstimatedUpperRequestRateRPS = floatPtr(estimatedUpper)
 	}
 
 	return summary
+}
+
+func canEstimateCapacityHeadroom(report *model.AnalysisReport) bool {
+	if report == nil || report.CurrentLoadSummary == nil {
+		return true
+	}
+	return strings.TrimSpace(report.CurrentLoadSummary.SaturationSource) != "gpu_utilization_proxy"
 }
 
 func serviceBottleneck(load *model.CurrentLoadSummary) model.BottleneckSummary {

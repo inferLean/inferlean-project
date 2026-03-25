@@ -60,18 +60,24 @@ func ExtractFeatures(report *model.AnalysisReport) FeatureSet {
 	}
 	if loadPct, ok := metricAveragePct(features.Metrics, "DCGM_FI_PROF_SM_ACTIVE"); ok {
 		features.AvgGPUComputeLoadPct = loadPct
+		features.ComputeLoadSource = "dcgm_sm_active"
 	} else if loadPct, ok := metricAveragePct(features.Metrics, "DCGM_FI_PROF_GR_ENGINE_ACTIVE"); ok {
 		features.AvgGPUComputeLoadPct = loadPct
+		features.ComputeLoadSource = "dcgm_gr_engine_active"
 	} else {
 		features.AvgGPUComputeLoadPct = features.AvgGPUUtilizationPct
+		features.ComputeLoadSource = "gpu_utilization_proxy"
 	}
 	if loadPct, ok := metricAveragePct(features.Metrics, "DCGM_FI_PROF_DRAM_ACTIVE"); ok {
 		features.AvgGPUMemoryBandwidthLoadPct = loadPct
+		features.MemoryBandwidthLoadAvailable = true
 	} else if loadPct, ok := metricAveragePct(features.Metrics, "DCGM_FI_DEV_MEM_COPY_UTIL"); ok {
 		features.AvgGPUMemoryBandwidthLoadPct = loadPct
+		features.MemoryBandwidthLoadAvailable = true
 	}
 	if loadPct, ok := metricAveragePct(features.Metrics, "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE"); ok {
 		features.AvgGPUTensorLoadPct = loadPct
+		features.TensorLoadAvailable = true
 	}
 
 	running := pickMetric(features.Metrics, "vllm:num_requests_running")
@@ -137,6 +143,8 @@ func ExtractFeatures(report *model.AnalysisReport) FeatureSet {
 	features.EnoughLatencySamples = features.TrafficObserved &&
 		features.TTFTCountDelta >= 5 &&
 		features.QueueTimeCountDelta >= 5
+	features.RealSaturationMetricsAvailable = hasRealSaturationMetrics(features)
+	features.SaturationSource = saturationSource(features)
 
 	return features
 }
@@ -326,103 +334,136 @@ func hasMultimodalConfig(config map[string]any) bool {
 
 func featureSummaryFromSet(features FeatureSet) model.FeatureSummary {
 	return model.FeatureSummary{
-		SnapshotCount:                features.SnapshotCount,
-		IntervalSeconds:              features.IntervalSeconds,
-		ModelName:                    features.ModelName,
-		MultimodalLikely:             features.MultimodalLikely,
-		MMPreprocessorCacheDisabled:  features.MMPreprocessorCacheDisabled,
-		MMProcessorCacheGB:           features.MMProcessorCacheGB,
-		TrafficObserved:              features.TrafficObserved,
-		EnoughLatencySamples:         features.EnoughLatencySamples,
-		EnoughKVCacheSamples:         features.EnoughKVCacheSamples,
-		AvgGPUComputeLoadPct:         features.AvgGPUComputeLoadPct,
-		AvgGPUMemoryBandwidthLoadPct: features.AvgGPUMemoryBandwidthLoadPct,
-		AvgGPUTensorLoadPct:          features.AvgGPUTensorLoadPct,
-		AvgGPUUtilizationPct:         features.AvgGPUUtilizationPct,
-		MaxGPUUtilizationPct:         features.MaxGPUUtilizationPct,
-		AvgRequestsRunning:           features.AvgRequestsRunning,
-		MaxRequestsRunning:           features.MaxRequestsRunning,
-		AvgRequestsWaiting:           features.AvgRequestsWaiting,
-		MaxRequestsWaiting:           features.MaxRequestsWaiting,
-		AvgKVCacheUsagePct:           features.AvgKVCacheUsagePct,
-		MaxKVCacheUsagePct:           features.MaxKVCacheUsagePct,
-		AvgTTFTSeconds:               features.AvgTTFTSeconds,
-		TTFTCountDelta:               features.TTFTCountDelta,
-		AvgQueueTimeSeconds:          features.AvgQueueTimeSeconds,
-		QueueTimeCountDelta:          features.QueueTimeCountDelta,
-		AvgRequestLatencySeconds:     features.AvgRequestLatencySeconds,
-		RequestLatencyCountDelta:     features.RequestLatencyCountDelta,
-		AvgPrefillTimeSeconds:        features.AvgPrefillTimeSeconds,
-		PrefillCountDelta:            features.PrefillCountDelta,
-		AvgDecodeTimeSeconds:         features.AvgDecodeTimeSeconds,
-		DecodeCountDelta:             features.DecodeCountDelta,
-		RequestSuccessDelta:          features.RequestSuccessDelta,
-		PromptTokensDelta:            features.PromptTokensDelta,
-		GenerationTokensDelta:        features.GenerationTokensDelta,
-		PreemptionsDelta:             features.PreemptionsDelta,
-		PrefixCacheQueriesDelta:      features.PrefixCacheQueriesDelta,
-		PrefixCacheHitsDelta:         features.PrefixCacheHitsDelta,
-		MMCacheQueriesDelta:          features.MMCacheQueriesDelta,
-		MMCacheHitsDelta:             features.MMCacheHitsDelta,
-		PromptTokensCachedDelta:      features.PromptTokensCachedDelta,
-		PromptTokensRecomputedDelta:  features.PromptTokensRecomputedDelta,
-		GPUFBUsedBytesAvg:            features.GPUFBUsedBytesAvg,
-		GPUFBFreeBytesAvg:            features.GPUFBFreeBytesAvg,
-		GPUFBUsagePctAvg:             features.GPUFBUsagePctAvg,
-		XIDErrorsDelta:               features.XIDErrorsDelta,
-		AverageCPUUtilizationPct:     features.AverageCPUUtilizationPct,
+		SnapshotCount:                  features.SnapshotCount,
+		IntervalSeconds:                features.IntervalSeconds,
+		ModelName:                      features.ModelName,
+		MultimodalLikely:               features.MultimodalLikely,
+		MMPreprocessorCacheDisabled:    features.MMPreprocessorCacheDisabled,
+		MMProcessorCacheGB:             features.MMProcessorCacheGB,
+		TrafficObserved:                features.TrafficObserved,
+		EnoughLatencySamples:           features.EnoughLatencySamples,
+		EnoughKVCacheSamples:           features.EnoughKVCacheSamples,
+		AvgGPUComputeLoadPct:           features.AvgGPUComputeLoadPct,
+		ComputeLoadSource:              features.ComputeLoadSource,
+		AvgGPUMemoryBandwidthLoadPct:   features.AvgGPUMemoryBandwidthLoadPct,
+		MemoryBandwidthLoadAvailable:   features.MemoryBandwidthLoadAvailable,
+		AvgGPUTensorLoadPct:            features.AvgGPUTensorLoadPct,
+		TensorLoadAvailable:            features.TensorLoadAvailable,
+		SaturationSource:               features.SaturationSource,
+		RealSaturationMetricsAvailable: features.RealSaturationMetricsAvailable,
+		AvgGPUUtilizationPct:           features.AvgGPUUtilizationPct,
+		MaxGPUUtilizationPct:           features.MaxGPUUtilizationPct,
+		AvgRequestsRunning:             features.AvgRequestsRunning,
+		MaxRequestsRunning:             features.MaxRequestsRunning,
+		AvgRequestsWaiting:             features.AvgRequestsWaiting,
+		MaxRequestsWaiting:             features.MaxRequestsWaiting,
+		AvgKVCacheUsagePct:             features.AvgKVCacheUsagePct,
+		MaxKVCacheUsagePct:             features.MaxKVCacheUsagePct,
+		AvgTTFTSeconds:                 features.AvgTTFTSeconds,
+		TTFTCountDelta:                 features.TTFTCountDelta,
+		AvgQueueTimeSeconds:            features.AvgQueueTimeSeconds,
+		QueueTimeCountDelta:            features.QueueTimeCountDelta,
+		AvgRequestLatencySeconds:       features.AvgRequestLatencySeconds,
+		RequestLatencyCountDelta:       features.RequestLatencyCountDelta,
+		AvgPrefillTimeSeconds:          features.AvgPrefillTimeSeconds,
+		PrefillCountDelta:              features.PrefillCountDelta,
+		AvgDecodeTimeSeconds:           features.AvgDecodeTimeSeconds,
+		DecodeCountDelta:               features.DecodeCountDelta,
+		RequestSuccessDelta:            features.RequestSuccessDelta,
+		PromptTokensDelta:              features.PromptTokensDelta,
+		GenerationTokensDelta:          features.GenerationTokensDelta,
+		PreemptionsDelta:               features.PreemptionsDelta,
+		PrefixCacheQueriesDelta:        features.PrefixCacheQueriesDelta,
+		PrefixCacheHitsDelta:           features.PrefixCacheHitsDelta,
+		MMCacheQueriesDelta:            features.MMCacheQueriesDelta,
+		MMCacheHitsDelta:               features.MMCacheHitsDelta,
+		PromptTokensCachedDelta:        features.PromptTokensCachedDelta,
+		PromptTokensRecomputedDelta:    features.PromptTokensRecomputedDelta,
+		GPUFBUsedBytesAvg:              features.GPUFBUsedBytesAvg,
+		GPUFBFreeBytesAvg:              features.GPUFBFreeBytesAvg,
+		GPUFBUsagePctAvg:               features.GPUFBUsagePctAvg,
+		XIDErrorsDelta:                 features.XIDErrorsDelta,
+		AverageCPUUtilizationPct:       features.AverageCPUUtilizationPct,
 	}
 }
 
 func featureSetFromSummary(summary model.FeatureSummary) FeatureSet {
 	return FeatureSet{
-		Metrics:                      map[string]MetricSummary{},
-		SnapshotCount:                summary.SnapshotCount,
-		IntervalSeconds:              summary.IntervalSeconds,
-		ModelName:                    summary.ModelName,
-		MultimodalLikely:             summary.MultimodalLikely,
-		MMPreprocessorCacheDisabled:  summary.MMPreprocessorCacheDisabled,
-		MMProcessorCacheGB:           summary.MMProcessorCacheGB,
-		TrafficObserved:              summary.TrafficObserved,
-		EnoughLatencySamples:         summary.EnoughLatencySamples,
-		EnoughKVCacheSamples:         summary.EnoughKVCacheSamples,
-		AvgGPUComputeLoadPct:         summary.AvgGPUComputeLoadPct,
-		AvgGPUMemoryBandwidthLoadPct: summary.AvgGPUMemoryBandwidthLoadPct,
-		AvgGPUTensorLoadPct:          summary.AvgGPUTensorLoadPct,
-		AvgGPUUtilizationPct:         summary.AvgGPUUtilizationPct,
-		MaxGPUUtilizationPct:         summary.MaxGPUUtilizationPct,
-		AvgRequestsRunning:           summary.AvgRequestsRunning,
-		MaxRequestsRunning:           summary.MaxRequestsRunning,
-		AvgRequestsWaiting:           summary.AvgRequestsWaiting,
-		MaxRequestsWaiting:           summary.MaxRequestsWaiting,
-		AvgKVCacheUsagePct:           summary.AvgKVCacheUsagePct,
-		MaxKVCacheUsagePct:           summary.MaxKVCacheUsagePct,
-		AvgTTFTSeconds:               summary.AvgTTFTSeconds,
-		TTFTCountDelta:               summary.TTFTCountDelta,
-		AvgQueueTimeSeconds:          summary.AvgQueueTimeSeconds,
-		QueueTimeCountDelta:          summary.QueueTimeCountDelta,
-		AvgRequestLatencySeconds:     summary.AvgRequestLatencySeconds,
-		RequestLatencyCountDelta:     summary.RequestLatencyCountDelta,
-		AvgPrefillTimeSeconds:        summary.AvgPrefillTimeSeconds,
-		PrefillCountDelta:            summary.PrefillCountDelta,
-		AvgDecodeTimeSeconds:         summary.AvgDecodeTimeSeconds,
-		DecodeCountDelta:             summary.DecodeCountDelta,
-		RequestSuccessDelta:          summary.RequestSuccessDelta,
-		PromptTokensDelta:            summary.PromptTokensDelta,
-		GenerationTokensDelta:        summary.GenerationTokensDelta,
-		PreemptionsDelta:             summary.PreemptionsDelta,
-		PrefixCacheQueriesDelta:      summary.PrefixCacheQueriesDelta,
-		PrefixCacheHitsDelta:         summary.PrefixCacheHitsDelta,
-		MMCacheQueriesDelta:          summary.MMCacheQueriesDelta,
-		MMCacheHitsDelta:             summary.MMCacheHitsDelta,
-		PromptTokensCachedDelta:      summary.PromptTokensCachedDelta,
-		PromptTokensRecomputedDelta:  summary.PromptTokensRecomputedDelta,
-		GPUFBUsedBytesAvg:            summary.GPUFBUsedBytesAvg,
-		GPUFBFreeBytesAvg:            summary.GPUFBFreeBytesAvg,
-		GPUFBUsagePctAvg:             summary.GPUFBUsagePctAvg,
-		XIDErrorsDelta:               summary.XIDErrorsDelta,
-		AverageCPUUtilizationPct:     summary.AverageCPUUtilizationPct,
+		Metrics:                        map[string]MetricSummary{},
+		SnapshotCount:                  summary.SnapshotCount,
+		IntervalSeconds:                summary.IntervalSeconds,
+		ModelName:                      summary.ModelName,
+		MultimodalLikely:               summary.MultimodalLikely,
+		MMPreprocessorCacheDisabled:    summary.MMPreprocessorCacheDisabled,
+		MMProcessorCacheGB:             summary.MMProcessorCacheGB,
+		TrafficObserved:                summary.TrafficObserved,
+		EnoughLatencySamples:           summary.EnoughLatencySamples,
+		EnoughKVCacheSamples:           summary.EnoughKVCacheSamples,
+		AvgGPUComputeLoadPct:           summary.AvgGPUComputeLoadPct,
+		ComputeLoadSource:              summary.ComputeLoadSource,
+		AvgGPUMemoryBandwidthLoadPct:   summary.AvgGPUMemoryBandwidthLoadPct,
+		MemoryBandwidthLoadAvailable:   summary.MemoryBandwidthLoadAvailable,
+		AvgGPUTensorLoadPct:            summary.AvgGPUTensorLoadPct,
+		TensorLoadAvailable:            summary.TensorLoadAvailable,
+		SaturationSource:               summary.SaturationSource,
+		RealSaturationMetricsAvailable: summary.RealSaturationMetricsAvailable,
+		AvgGPUUtilizationPct:           summary.AvgGPUUtilizationPct,
+		MaxGPUUtilizationPct:           summary.MaxGPUUtilizationPct,
+		AvgRequestsRunning:             summary.AvgRequestsRunning,
+		MaxRequestsRunning:             summary.MaxRequestsRunning,
+		AvgRequestsWaiting:             summary.AvgRequestsWaiting,
+		MaxRequestsWaiting:             summary.MaxRequestsWaiting,
+		AvgKVCacheUsagePct:             summary.AvgKVCacheUsagePct,
+		MaxKVCacheUsagePct:             summary.MaxKVCacheUsagePct,
+		AvgTTFTSeconds:                 summary.AvgTTFTSeconds,
+		TTFTCountDelta:                 summary.TTFTCountDelta,
+		AvgQueueTimeSeconds:            summary.AvgQueueTimeSeconds,
+		QueueTimeCountDelta:            summary.QueueTimeCountDelta,
+		AvgRequestLatencySeconds:       summary.AvgRequestLatencySeconds,
+		RequestLatencyCountDelta:       summary.RequestLatencyCountDelta,
+		AvgPrefillTimeSeconds:          summary.AvgPrefillTimeSeconds,
+		PrefillCountDelta:              summary.PrefillCountDelta,
+		AvgDecodeTimeSeconds:           summary.AvgDecodeTimeSeconds,
+		DecodeCountDelta:               summary.DecodeCountDelta,
+		RequestSuccessDelta:            summary.RequestSuccessDelta,
+		PromptTokensDelta:              summary.PromptTokensDelta,
+		GenerationTokensDelta:          summary.GenerationTokensDelta,
+		PreemptionsDelta:               summary.PreemptionsDelta,
+		PrefixCacheQueriesDelta:        summary.PrefixCacheQueriesDelta,
+		PrefixCacheHitsDelta:           summary.PrefixCacheHitsDelta,
+		MMCacheQueriesDelta:            summary.MMCacheQueriesDelta,
+		MMCacheHitsDelta:               summary.MMCacheHitsDelta,
+		PromptTokensCachedDelta:        summary.PromptTokensCachedDelta,
+		PromptTokensRecomputedDelta:    summary.PromptTokensRecomputedDelta,
+		GPUFBUsedBytesAvg:              summary.GPUFBUsedBytesAvg,
+		GPUFBFreeBytesAvg:              summary.GPUFBFreeBytesAvg,
+		GPUFBUsagePctAvg:               summary.GPUFBUsagePctAvg,
+		XIDErrorsDelta:                 summary.XIDErrorsDelta,
+		AverageCPUUtilizationPct:       summary.AverageCPUUtilizationPct,
 	}
+}
+
+func hasMeasuredComputeLoad(features FeatureSet) bool {
+	switch strings.TrimSpace(features.ComputeLoadSource) {
+	case "dcgm_sm_active", "dcgm_gr_engine_active":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasRealSaturationMetrics(features FeatureSet) bool {
+	return hasMeasuredComputeLoad(features) || features.MemoryBandwidthLoadAvailable || features.TensorLoadAvailable
+}
+
+func saturationSource(features FeatureSet) string {
+	if hasRealSaturationMetrics(features) {
+		return "measured"
+	}
+	if strings.TrimSpace(features.ComputeLoadSource) == "gpu_utilization_proxy" {
+		return "gpu_utilization_proxy"
+	}
+	return ""
 }
 
 func requestLatencyPercentilesMS(report *model.AnalysisReport) (p50MS, p90MS, p99MS *float64, available bool) {

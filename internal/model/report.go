@@ -131,51 +131,56 @@ type CollectedMetricPoint struct {
 }
 
 type FeatureSummary struct {
-	SnapshotCount                int     `json:"snapshot_count,omitempty"`
-	IntervalSeconds              float64 `json:"interval_seconds,omitempty"`
-	ModelName                    string  `json:"model_name,omitempty"`
-	MultimodalLikely             bool    `json:"multimodal_likely,omitempty"`
-	MMPreprocessorCacheDisabled  bool    `json:"mm_preprocessor_cache_disabled,omitempty"`
-	MMProcessorCacheGB           float64 `json:"mm_processor_cache_gb,omitempty"`
-	TrafficObserved              bool    `json:"traffic_observed,omitempty"`
-	EnoughLatencySamples         bool    `json:"enough_latency_samples,omitempty"`
-	EnoughKVCacheSamples         bool    `json:"enough_kv_cache_samples,omitempty"`
-	AvgGPUComputeLoadPct         float64 `json:"avg_gpu_compute_load_pct,omitempty"`
-	AvgGPUMemoryBandwidthLoadPct float64 `json:"avg_gpu_memory_bandwidth_load_pct,omitempty"`
-	AvgGPUTensorLoadPct          float64 `json:"avg_gpu_tensor_load_pct,omitempty"`
-	AvgGPUUtilizationPct         float64 `json:"avg_gpu_utilization_pct,omitempty"`
-	MaxGPUUtilizationPct         float64 `json:"max_gpu_utilization_pct,omitempty"`
-	AvgRequestsRunning           float64 `json:"avg_requests_running,omitempty"`
-	MaxRequestsRunning           float64 `json:"max_requests_running,omitempty"`
-	AvgRequestsWaiting           float64 `json:"avg_requests_waiting,omitempty"`
-	MaxRequestsWaiting           float64 `json:"max_requests_waiting,omitempty"`
-	AvgKVCacheUsagePct           float64 `json:"avg_kv_cache_usage_pct,omitempty"`
-	MaxKVCacheUsagePct           float64 `json:"max_kv_cache_usage_pct,omitempty"`
-	AvgTTFTSeconds               float64 `json:"avg_ttft_seconds,omitempty"`
-	TTFTCountDelta               float64 `json:"ttft_count_delta,omitempty"`
-	AvgQueueTimeSeconds          float64 `json:"avg_queue_time_seconds,omitempty"`
-	QueueTimeCountDelta          float64 `json:"queue_time_count_delta,omitempty"`
-	AvgRequestLatencySeconds     float64 `json:"avg_request_latency_seconds,omitempty"`
-	RequestLatencyCountDelta     float64 `json:"request_latency_count_delta,omitempty"`
-	AvgPrefillTimeSeconds        float64 `json:"avg_prefill_time_seconds,omitempty"`
-	PrefillCountDelta            float64 `json:"prefill_count_delta,omitempty"`
-	AvgDecodeTimeSeconds         float64 `json:"avg_decode_time_seconds,omitempty"`
-	DecodeCountDelta             float64 `json:"decode_count_delta,omitempty"`
-	RequestSuccessDelta          float64 `json:"request_success_delta,omitempty"`
-	PromptTokensDelta            float64 `json:"prompt_tokens_delta,omitempty"`
-	GenerationTokensDelta        float64 `json:"generation_tokens_delta,omitempty"`
-	PreemptionsDelta             float64 `json:"preemptions_delta,omitempty"`
-	PrefixCacheQueriesDelta      float64 `json:"prefix_cache_queries_delta,omitempty"`
-	PrefixCacheHitsDelta         float64 `json:"prefix_cache_hits_delta,omitempty"`
-	MMCacheQueriesDelta          float64 `json:"mm_cache_queries_delta,omitempty"`
-	MMCacheHitsDelta             float64 `json:"mm_cache_hits_delta,omitempty"`
-	PromptTokensCachedDelta      float64 `json:"prompt_tokens_cached_delta,omitempty"`
-	PromptTokensRecomputedDelta  float64 `json:"prompt_tokens_recomputed_delta,omitempty"`
-	GPUFBUsedBytesAvg            float64 `json:"gpu_fb_used_bytes_avg,omitempty"`
-	GPUFBFreeBytesAvg            float64 `json:"gpu_fb_free_bytes_avg,omitempty"`
-	GPUFBUsagePctAvg             float64 `json:"gpu_fb_usage_pct_avg,omitempty"`
-	XIDErrorsDelta               float64 `json:"xid_errors_delta,omitempty"`
-	AverageCPUUtilizationPct     float64 `json:"average_cpu_utilization_pct,omitempty"`
+	SnapshotCount                  int     `json:"snapshot_count,omitempty"`
+	IntervalSeconds                float64 `json:"interval_seconds,omitempty"`
+	ModelName                      string  `json:"model_name,omitempty"`
+	MultimodalLikely               bool    `json:"multimodal_likely,omitempty"`
+	MMPreprocessorCacheDisabled    bool    `json:"mm_preprocessor_cache_disabled,omitempty"`
+	MMProcessorCacheGB             float64 `json:"mm_processor_cache_gb,omitempty"`
+	TrafficObserved                bool    `json:"traffic_observed,omitempty"`
+	EnoughLatencySamples           bool    `json:"enough_latency_samples,omitempty"`
+	EnoughKVCacheSamples           bool    `json:"enough_kv_cache_samples,omitempty"`
+	AvgGPUComputeLoadPct           float64 `json:"avg_gpu_compute_load_pct,omitempty"`
+	ComputeLoadSource              string  `json:"compute_load_source,omitempty"`
+	AvgGPUMemoryBandwidthLoadPct   float64 `json:"avg_gpu_memory_bandwidth_load_pct,omitempty"`
+	MemoryBandwidthLoadAvailable   bool    `json:"memory_bandwidth_load_available,omitempty"`
+	AvgGPUTensorLoadPct            float64 `json:"avg_gpu_tensor_load_pct,omitempty"`
+	TensorLoadAvailable            bool    `json:"tensor_load_available,omitempty"`
+	SaturationSource               string  `json:"saturation_source,omitempty"`
+	RealSaturationMetricsAvailable bool    `json:"real_saturation_metrics_available,omitempty"`
+	AvgGPUUtilizationPct           float64 `json:"avg_gpu_utilization_pct,omitempty"`
+	MaxGPUUtilizationPct           float64 `json:"max_gpu_utilization_pct,omitempty"`
+	AvgRequestsRunning             float64 `json:"avg_requests_running,omitempty"`
+	MaxRequestsRunning             float64 `json:"max_requests_running,omitempty"`
+	AvgRequestsWaiting             float64 `json:"avg_requests_waiting,omitempty"`
+	MaxRequestsWaiting             float64 `json:"max_requests_waiting,omitempty"`
+	AvgKVCacheUsagePct             float64 `json:"avg_kv_cache_usage_pct,omitempty"`
+	MaxKVCacheUsagePct             float64 `json:"max_kv_cache_usage_pct,omitempty"`
+	AvgTTFTSeconds                 float64 `json:"avg_ttft_seconds,omitempty"`
+	TTFTCountDelta                 float64 `json:"ttft_count_delta,omitempty"`
+	AvgQueueTimeSeconds            float64 `json:"avg_queue_time_seconds,omitempty"`
+	QueueTimeCountDelta            float64 `json:"queue_time_count_delta,omitempty"`
+	AvgRequestLatencySeconds       float64 `json:"avg_request_latency_seconds,omitempty"`
+	RequestLatencyCountDelta       float64 `json:"request_latency_count_delta,omitempty"`
+	AvgPrefillTimeSeconds          float64 `json:"avg_prefill_time_seconds,omitempty"`
+	PrefillCountDelta              float64 `json:"prefill_count_delta,omitempty"`
+	AvgDecodeTimeSeconds           float64 `json:"avg_decode_time_seconds,omitempty"`
+	DecodeCountDelta               float64 `json:"decode_count_delta,omitempty"`
+	RequestSuccessDelta            float64 `json:"request_success_delta,omitempty"`
+	PromptTokensDelta              float64 `json:"prompt_tokens_delta,omitempty"`
+	GenerationTokensDelta          float64 `json:"generation_tokens_delta,omitempty"`
+	PreemptionsDelta               float64 `json:"preemptions_delta,omitempty"`
+	PrefixCacheQueriesDelta        float64 `json:"prefix_cache_queries_delta,omitempty"`
+	PrefixCacheHitsDelta           float64 `json:"prefix_cache_hits_delta,omitempty"`
+	MMCacheQueriesDelta            float64 `json:"mm_cache_queries_delta,omitempty"`
+	MMCacheHitsDelta               float64 `json:"mm_cache_hits_delta,omitempty"`
+	PromptTokensCachedDelta        float64 `json:"prompt_tokens_cached_delta,omitempty"`
+	PromptTokensRecomputedDelta    float64 `json:"prompt_tokens_recomputed_delta,omitempty"`
+	GPUFBUsedBytesAvg              float64 `json:"gpu_fb_used_bytes_avg,omitempty"`
+	GPUFBFreeBytesAvg              float64 `json:"gpu_fb_free_bytes_avg,omitempty"`
+	GPUFBUsagePctAvg               float64 `json:"gpu_fb_usage_pct_avg,omitempty"`
+	XIDErrorsDelta                 float64 `json:"xid_errors_delta,omitempty"`
+	AverageCPUUtilizationPct       float64 `json:"average_cpu_utilization_pct,omitempty"`
 }
 
 type CurrentLoadSummary struct {
@@ -187,8 +192,13 @@ type CurrentLoadSummary struct {
 	CurrentLoadBottleneck           string  `json:"current_load_bottleneck,omitempty"`
 	CurrentLoadBottleneckConfidence float64 `json:"current_load_bottleneck_confidence,omitempty"`
 	ComputeLoadPct                  float64 `json:"compute_load_pct,omitempty"`
+	ComputeLoadSource               string  `json:"compute_load_source,omitempty"`
 	MemoryBandwidthLoadPct          float64 `json:"memory_bandwidth_load_pct,omitempty"`
+	MemoryBandwidthLoadAvailable    bool    `json:"memory_bandwidth_load_available,omitempty"`
 	TensorLoadPct                   float64 `json:"tensor_load_pct,omitempty"`
+	TensorLoadAvailable             bool    `json:"tensor_load_available,omitempty"`
+	SaturationSource                string  `json:"saturation_source,omitempty"`
+	RealSaturationMetricsAvailable  bool    `json:"real_saturation_metrics_available,omitempty"`
 	CPULoadPct                      float64 `json:"cpu_load_pct,omitempty"`
 	QueuePressureRatio              float64 `json:"queue_pressure_ratio,omitempty"`
 	TargetQueueSize                 float64 `json:"target_queue_size,omitempty"`
