@@ -74,48 +74,30 @@ func (r *Recommender) Recommend(ctx context.Context, opts Options) (*model.Recom
 	if err != nil {
 		return nil, err
 	}
-	matches := rankCorpusProfiles(corpus, derived)
-	if len(matches) > 0 {
-		match := matches[0]
-		report.MatchedCorpusProfile = &model.MatchedCorpusProfile{
-			ID:            match.Profile.ID,
-			CorpusVersion: match.CorpusVersion,
-			ModelName:     match.Profile.ModelName,
-			ModelFamily:   match.Profile.ModelFamily,
-			GPUCount:      match.Profile.GPUCount,
-			HardwareClass: match.Profile.HardwareClass,
-			WorkloadClass: match.Profile.WorkloadClass,
-			MatchScore:    match.Score,
-			Basis:         match.Basis,
+	calibration := nearestCalibrationMatch(corpus, derived)
+	if calibration != nil {
+		report.MatchedCorpusProfile = matchedCorpusProfileModel(calibration)
+		if calibration.BaselinePrediction != nil {
+			report.BaselinePrediction = calibration.BaselinePrediction
 		}
-		if baseline := selectNearestMeasurement(match.Profile, derived.CurrentNumeric); baseline != nil {
-			report.BaselinePrediction = predictionFromMeasurement(baseline.Measurement, baselinePredictionBasis(*baseline), clampFloat(match.Score*baselineConfidence(*baseline), 0.4, 0.98))
-		}
-		recommendations, warnings := buildCorpusRecommendations(matches, derived, objective, guardrail, report.BaselinePrediction)
-		if len(recommendations) > 0 {
-			report.Recommendations = append(report.Recommendations, recommendations...)
-		}
-		if len(warnings) > 0 {
-			report.Warnings = append(report.Warnings, warnings...)
-		}
-		if len(opts.ScenarioSet) > 0 {
-			if scenario, warning := buildScenarioPrediction(match, derived, opts.ScenarioSet); scenario != nil {
+	}
+
+	report.Recommendations = buildIssueRecommendations(analysis, derived, objective, report.BaselinePrediction)
+	applyCorpusCalibration(report, calibration, derived)
+	assignRecommendationPriorities(report.Recommendations)
+
+	if len(opts.ScenarioSet) > 0 {
+		if calibration != nil {
+			if scenario, warning := buildScenarioPrediction(calibration.Match, derived, opts.ScenarioSet); scenario != nil {
 				report.ScenarioPrediction = scenario
 			} else if warning != "" {
 				report.Warnings = append(report.Warnings, warning)
 			}
-		}
-	} else {
-		report.Warnings = append(report.Warnings, "no close corpus profile match was found; using conservative rule-based fallback")
-		if recommendation := buildFallbackRecommendation(analysis, derived, objective, report.BaselinePrediction); recommendation != nil {
-			report.Recommendations = append(report.Recommendations, *recommendation)
-		}
-		if len(opts.ScenarioSet) > 0 {
+		} else {
 			report.ScenarioPrediction = buildFallbackScenarioPrediction(analysis, derived, opts.ScenarioSet, report.BaselinePrediction)
 		}
 	}
-	report.Recommendations = append(report.Recommendations, buildCacheRecommendations(analysis, derived, objective)...)
-	assignRecommendationPriorities(report.Recommendations)
+
 	report.CapacityOpportunity = buildCapacityOpportunity(analysis, report)
 	populateRecommendationSummary(report, analysis)
 
@@ -159,6 +141,7 @@ func deriveContext(report *model.AnalysisReport) derivedContext {
 		GPUCount:         gpuCount,
 		HardwareClass:    normalizeHardwareClass(report.GPUInformation.GPUModel),
 		WorkloadClass:    workloadClass,
+		Features:         features,
 		CurrentConfig:    current,
 		CurrentNumeric:   numericMap(current),
 		ObservedBaseline: observedPrediction(features),
@@ -190,14 +173,45 @@ func buildCapacityOpportunity(analysis *model.AnalysisReport, report *model.Reco
 		totalGPUCount = 1
 	}
 
+	estimateMode := "conservative_rule_range"
+	pointRecoverablePct := recoverableLoadPct
+	pointPredictedLoadPct := predictedLoadPct
+	lowRecoverablePct := recoverableLoadPct
+	highRecoverablePct := recoverableLoadPct
+	if usesPreciseBenchmarkHeadroom(report, topRecommendation) {
+		estimateMode = "benchmark_calibrated"
+		spread := clampFloat(recoverableLoadPct*(1-clampFloat(confidence, 0, 1))*0.30, 0.5, math.Max(recoverableLoadPct*0.15, 0.5))
+		lowRecoverablePct = clampFloat(recoverableLoadPct-spread, 0, recoverableLoadPct)
+		highRecoverablePct = clampFloat(recoverableLoadPct+spread, lowRecoverablePct, 100-currentLoadPct)
+	} else {
+		lowerBoundScale := clampFloat(confidence, 0.45, 0.75)
+		pointRecoverablePct = clampFloat(recoverableLoadPct*lowerBoundScale, 0, recoverableLoadPct)
+		pointPredictedLoadPct = clampFloat(currentLoadPct+pointRecoverablePct, currentLoadPct, 100)
+		lowRecoverablePct = pointRecoverablePct
+		highRecoverablePct = recoverableLoadPct
+	}
+
+	pointRecoverableCount := totalGPUCount * (pointRecoverablePct / 100)
+	lowRecoverableCount := totalGPUCount * (lowRecoverablePct / 100)
+	highRecoverableCount := totalGPUCount * (highRecoverablePct / 100)
+	predictedLowLoadPct := clampFloat(currentLoadPct+lowRecoverablePct, currentLoadPct, 100)
+	predictedHighLoadPct := clampFloat(currentLoadPct+highRecoverablePct, predictedLowLoadPct, 100)
+
 	return &model.CapacityOpportunity{
-		CurrentGPULoadPct:          currentLoadPct,
-		PredictedOptimalGPULoadPct: predictedLoadPct,
-		RecoverableGPULoadPct:      recoverableLoadPct,
-		RecoverableGPUCount:        totalGPUCount * (recoverableLoadPct / 100),
-		TotalGPUCount:              totalGPUCount,
-		Basis:                      basis,
-		Confidence:                 confidence,
+		CurrentGPULoadPct:              currentLoadPct,
+		PredictedOptimalGPULoadPct:     pointPredictedLoadPct,
+		RecoverableGPULoadPct:          pointRecoverablePct,
+		RecoverableGPUCount:            pointRecoverableCount,
+		TotalGPUCount:                  totalGPUCount,
+		EstimateMode:                   estimateMode,
+		PredictedOptimalGPULoadPctLow:  floatPtr(predictedLowLoadPct),
+		PredictedOptimalGPULoadPctHigh: floatPtr(predictedHighLoadPct),
+		RecoverableGPULoadPctLow:       floatPtr(lowRecoverablePct),
+		RecoverableGPULoadPctHigh:      floatPtr(highRecoverablePct),
+		RecoverableGPUCountLow:         floatPtr(lowRecoverableCount),
+		RecoverableGPUCountHigh:        floatPtr(highRecoverableCount),
+		Basis:                          basis,
+		Confidence:                     confidence,
 	}
 }
 
@@ -316,18 +330,13 @@ func buildPredictedImpact(report *model.RecommendationReport) *model.PredictedIm
 			summary.RequestLatencyMS.P50 = model.NumericImpact{After: &after, DeltaPct: deltaFromCurrent(current.RequestLatencyMS.P50, after)}
 		}
 	}
-	if prediction != nil && prediction.GPUUtilizationPct > 0 {
-		after := prediction.GPUUtilizationPct
-		var delta *float64
-		if report.CapacityOpportunity != nil && report.CapacityOpportunity.CurrentGPULoadPct > 0 {
-			value := pctDelta(after, report.CapacityOpportunity.CurrentGPULoadPct)
-			delta = &value
-		}
-		summary.GPUUtilizationPct = model.NumericImpact{After: &after, DeltaPct: delta}
-	} else if report.CapacityOpportunity != nil && report.CapacityOpportunity.PredictedOptimalGPULoadPct > 0 {
+	if report.CapacityOpportunity != nil && report.CapacityOpportunity.PredictedOptimalGPULoadPct > 0 {
 		after := report.CapacityOpportunity.PredictedOptimalGPULoadPct
 		value := pctDelta(after, report.CapacityOpportunity.CurrentGPULoadPct)
 		summary.GPUUtilizationPct = model.NumericImpact{After: &after, DeltaPct: optionalDelta(value)}
+	} else if prediction != nil && prediction.GPUUtilizationPct > 0 {
+		after := prediction.GPUUtilizationPct
+		summary.GPUUtilizationPct = model.NumericImpact{After: &after, DeltaPct: deltaFromCurrent(currentGPUUtilization(report), after)}
 	}
 	if summary.RequestRateRPS.After == nil &&
 		summary.RequestLatencyMS.Avg.After == nil &&
@@ -357,19 +366,7 @@ func buildWastedCapacity(report *model.RecommendationReport) *model.WastedCapaci
 		basis = strings.TrimSpace(report.CapacityOpportunity.Basis)
 		confidence = clampFloat(report.CapacityOpportunity.Confidence, 0, 1)
 	}
-	if gpuHeadroomPct != nil && *gpuHeadroomPct > 0 {
-		headline := fmt.Sprintf("%.1f%% GPU headroom recoverable (%.1f GPU)", *gpuHeadroomPct, derefFloat(gpuHeadroomCount))
-		return &model.WastedCapacitySummary{
-			Headline:         headline,
-			ThroughputGapRPS: nil,
-			ThroughputGapPct: deltaPct,
-			GPUHeadroomPct:   gpuHeadroomPct,
-			GPUHeadroomCount: gpuHeadroomCount,
-			Basis:            firstNonEmpty(firstRecommendationBasis(report), basis),
-			Confidence:       firstNonZero(firstRecommendationConfidence(report), confidence),
-		}
-	}
-	if afterRPS != nil && report.CurrentServiceState != nil && report.CurrentServiceState.RequestRateRPS != nil {
+	if preferThroughputHeadroom(report) && afterRPS != nil && report.CurrentServiceState != nil && report.CurrentServiceState.RequestRateRPS != nil {
 		gap := *afterRPS - *report.CurrentServiceState.RequestRateRPS
 		if gap > 0 {
 			headline := fmt.Sprintf("+%.2f req/s recoverable", gap)
@@ -382,6 +379,18 @@ func buildWastedCapacity(report *model.RecommendationReport) *model.WastedCapaci
 				Basis:            firstNonEmpty(strings.TrimSpace(firstRecommendationBasis(report)), basis),
 				Confidence:       firstNonZero(firstRecommendationConfidence(report), confidence),
 			}
+		}
+	}
+	if gpuHeadroomPct != nil && *gpuHeadroomPct > 0 {
+		headline := fmt.Sprintf("%.1fpp GPU load recoverable (%s GPU)", *gpuHeadroomPct, formatRecoverableGPUCount(derefFloat(gpuHeadroomCount)))
+		return &model.WastedCapacitySummary{
+			Headline:         headline,
+			ThroughputGapRPS: nil,
+			ThroughputGapPct: deltaPct,
+			GPUHeadroomPct:   gpuHeadroomPct,
+			GPUHeadroomCount: gpuHeadroomCount,
+			Basis:            firstNonEmpty(firstRecommendationBasis(report), basis),
+			Confidence:       firstNonZero(firstRecommendationConfidence(report), confidence),
 		}
 	}
 	return nil
@@ -460,6 +469,39 @@ func floatPtr(value float64) *float64 {
 	return &v
 }
 
+func currentGPUUtilization(report *model.RecommendationReport) *float64 {
+	if report == nil {
+		return nil
+	}
+	if report.CapacityOpportunity != nil && report.CapacityOpportunity.CurrentGPULoadPct > 0 {
+		return floatPtr(report.CapacityOpportunity.CurrentGPULoadPct)
+	}
+	if report.BaselinePrediction != nil && report.BaselinePrediction.GPUUtilizationPct > 0 {
+		return floatPtr(report.BaselinePrediction.GPUUtilizationPct)
+	}
+	return nil
+}
+
+func preferThroughputHeadroom(report *model.RecommendationReport) bool {
+	if report == nil || report.CapacityOpportunity == nil {
+		return true
+	}
+	return report.CapacityOpportunity.EstimateMode != "benchmark_calibrated"
+}
+
+func formatRecoverableGPUCount(value float64) string {
+	switch {
+	case value >= 0.1:
+		return fmt.Sprintf("%.1f", value)
+	case value >= 0.01:
+		return fmt.Sprintf("%.2f", value)
+	case value > 0:
+		return "<0.01"
+	default:
+		return "0.0"
+	}
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
@@ -488,6 +530,20 @@ func currentGPULoadPctForOpportunity(analysis *model.AnalysisReport, report *mod
 	return 0, false
 }
 
+func usesPreciseBenchmarkHeadroom(report *model.RecommendationReport, recommendation *model.RecommendationItem) bool {
+	if report == nil || recommendation == nil || report.MatchedCorpusProfile == nil || report.BaselinePrediction == nil {
+		return false
+	}
+	if recommendation.RecommendationSource != model.RecommendationSourceHybrid && recommendation.RecommendationSource != model.RecommendationSourceBenchmark {
+		return false
+	}
+	if report.MatchedCorpusProfile.MatchScore < corpusPreciseMinScore {
+		return false
+	}
+	return strings.Contains(strings.ToLower(report.BaselinePrediction.Basis), "benchmark") ||
+		strings.Contains(strings.ToLower(report.BaselinePrediction.Basis), "corpus")
+}
+
 func predictedGPULoadPctForOpportunity(currentLoadPct float64, recommendation *model.RecommendationItem) (float64, string, float64, bool) {
 	if recommendation == nil {
 		return 0, "", 0, false
@@ -503,7 +559,7 @@ func predictedGPULoadPctForOpportunity(currentLoadPct float64, recommendation *m
 	if basis != "" {
 		basis += " "
 	}
-	basis += "Estimated GPU utilization from predicted throughput uplift because corpus GPU utilization was unavailable."
+	basis += "Estimated GPU utilization from predicted throughput uplift."
 	confidence := clampFloat(math.Min(recommendation.Confidence, 0.58), 0.35, 0.58)
 	return predictedLoadPct, basis, confidence, true
 }

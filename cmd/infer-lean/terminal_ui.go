@@ -3,9 +3,12 @@ package main
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/inferLean/inferlean-project/internal/analyzer"
@@ -21,6 +24,15 @@ type terminalUI struct {
 	out     io.Writer
 	enabled bool
 	color   bool
+}
+
+type terminalProgressBar struct {
+	ui        terminalUI
+	label     string
+	width     int
+	mu        sync.Mutex
+	lastWidth int
+	closed    bool
 }
 
 type analysisSnapshot struct {
@@ -78,6 +90,130 @@ func (ui terminalUI) Step(message string) {
 
 func (ui terminalUI) Stepf(format string, args ...any) {
 	ui.Step(fmt.Sprintf(format, args...))
+}
+
+func (ui terminalUI) StartProgress(label string) *terminalProgressBar {
+	if !ui.enabled {
+		return nil
+	}
+	progress := &terminalProgressBar{
+		ui:    ui,
+		label: strings.TrimSpace(label),
+		width: 28,
+	}
+	if progress.label == "" {
+		progress.label = "Progress"
+	}
+	progress.Update(0, -1, "")
+	return progress
+}
+
+func (p *terminalProgressBar) Update(progress float64, eta time.Duration, detail string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return
+	}
+	p.renderLocked(progress, eta, detail, "")
+}
+
+func (p *terminalProgressBar) Complete(detail string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return
+	}
+	p.renderLocked(1, 0, detail, "done")
+	p.closed = true
+	fmt.Fprintln(p.ui.out)
+}
+
+func (p *terminalProgressBar) Fail(detail string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return
+	}
+	p.renderLocked(1, 0, detail, "failed")
+	p.closed = true
+	fmt.Fprintln(p.ui.out)
+}
+
+func (p *terminalProgressBar) renderLocked(progress float64, eta time.Duration, detail, status string) {
+	if p == nil {
+		return
+	}
+	progress = clampFloat(progress, 0, 1)
+	percent := int(math.Round(progress * 100))
+	filled := int(math.Round(progress * float64(p.width)))
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > p.width {
+		filled = p.width
+	}
+	empty := p.width - filled
+	bar := strings.Repeat("#", filled) + strings.Repeat("-", empty)
+	if p.ui.color {
+		bar = lipgloss.NewStyle().Foreground(lipgloss.Color("44")).Render(strings.Repeat("#", filled)) +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(strings.Repeat("-", empty))
+	}
+
+	statusLabel := ""
+	switch strings.TrimSpace(status) {
+	case "done":
+		statusLabel = "done"
+	case "failed":
+		statusLabel = "failed"
+	default:
+		statusLabel = fmt.Sprintf("ETA %s", formatProgressETA(eta))
+	}
+
+	label := p.label
+	if p.ui.color {
+		label = lipgloss.NewStyle().Bold(true).Render(label)
+	}
+	line := fmt.Sprintf("%s [%s] %3d%% %s", label, bar, percent, statusLabel)
+	if trimmed := strings.TrimSpace(detail); trimmed != "" {
+		line += " | " + trimmed
+	}
+
+	displayWidth := len([]rune(stripANSI(line)))
+	if displayWidth < p.lastWidth {
+		line += strings.Repeat(" ", p.lastWidth-displayWidth)
+	} else {
+		p.lastWidth = displayWidth
+	}
+	fmt.Fprintf(p.ui.out, "\r%s", line)
+}
+
+func stripANSI(text string) string {
+	var b strings.Builder
+	inEscape := false
+	for i := 0; i < len(text); i++ {
+		ch := text[i]
+		if inEscape {
+			if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') {
+				inEscape = false
+			}
+			continue
+		}
+		if ch == 0x1b {
+			inEscape = true
+			continue
+		}
+		b.WriteByte(ch)
+	}
+	return b.String()
 }
 
 func (ui terminalUI) RenderAnalyzeSummaryCard(report *model.AnalysisReport) {
@@ -683,6 +819,23 @@ func truncateRunes(text string, width int) string {
 	return string(runes[:width-3]) + "..."
 }
 
+func formatProgressETA(duration time.Duration) string {
+	if duration < 0 {
+		return "--:--"
+	}
+	totalSeconds := int(math.Round(duration.Seconds()))
+	if totalSeconds < 0 {
+		totalSeconds = 0
+	}
+	hours := totalSeconds / 3600
+	minutes := (totalSeconds % 3600) / 60
+	seconds := totalSeconds % 60
+	if hours > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", hours, minutes, seconds)
+	}
+	return fmt.Sprintf("%02d:%02d", minutes, seconds)
+}
+
 func saturationTone(value float64) string {
 	switch {
 	case value >= 85:
@@ -745,22 +898,35 @@ func wastedCapacityCLISummary(report *model.RecommendationReport) (string, strin
 	if report == nil {
 		return "", ""
 	}
-	if report.CapacityOpportunity != nil {
-		return "Wasted Capacity", fmt.Sprintf("%.1f%% | %.1f GPU recoverable", report.CapacityOpportunity.RecoverableGPULoadPct, report.CapacityOpportunity.RecoverableGPUCount)
-	}
 	if report.WastedCapacity != nil {
-		if report.WastedCapacity.GPUHeadroomPct != nil && report.WastedCapacity.GPUHeadroomCount != nil {
-			return "Wasted Capacity", fmt.Sprintf("%.1f%% | %.1f GPU recoverable", *report.WastedCapacity.GPUHeadroomPct, *report.WastedCapacity.GPUHeadroomCount)
-		}
 		if report.WastedCapacity.ThroughputGapRPS != nil {
 			if report.WastedCapacity.ThroughputGapPct != nil {
 				return "Req/s Headroom", fmt.Sprintf("+%s req/s recoverable (%+.1f%%)", formatRequestRate(*report.WastedCapacity.ThroughputGapRPS), *report.WastedCapacity.ThroughputGapPct)
 			}
 			return "Req/s Headroom", fmt.Sprintf("+%s req/s recoverable", formatRequestRate(*report.WastedCapacity.ThroughputGapRPS))
 		}
+		if report.WastedCapacity.GPUHeadroomPct != nil && report.WastedCapacity.GPUHeadroomCount != nil {
+			return "GPU Load Headroom", fmt.Sprintf("%.1fpp | %s GPU recoverable", *report.WastedCapacity.GPUHeadroomPct, formatRecoverableGPUCountCLI(*report.WastedCapacity.GPUHeadroomCount))
+		}
 		return "Wasted Capacity", strings.TrimSpace(report.WastedCapacity.Headline)
 	}
+	if report.CapacityOpportunity != nil {
+		return "GPU Load Headroom", fmt.Sprintf("%.1fpp | %s GPU recoverable", report.CapacityOpportunity.RecoverableGPULoadPct, formatRecoverableGPUCountCLI(report.CapacityOpportunity.RecoverableGPUCount))
+	}
 	return "", ""
+}
+
+func formatRecoverableGPUCountCLI(value float64) string {
+	switch {
+	case value >= 0.1:
+		return fmt.Sprintf("%.1f", value)
+	case value >= 0.01:
+		return fmt.Sprintf("%.2f", value)
+	case value > 0:
+		return "<0.01"
+	default:
+		return "0.0"
+	}
 }
 
 func targetGoalSummary(report *model.RecommendationReport) string {

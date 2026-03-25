@@ -37,6 +37,9 @@ func runIntent(args []string, stdout, stderr io.Writer) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
+	recordCLIEvent("intent.start", map[string]string{
+		"advanced": fmt.Sprintf("%t", *advanced),
+	})
 
 	reader := bufio.NewReader(cliInput)
 	profile := &model.WorkloadProfile{
@@ -130,6 +133,7 @@ func runIntent(args []string, stdout, stderr io.Writer) error {
 	if err := analyzer.SaveJSON(absOutput, profile); err != nil {
 		return err
 	}
+	recordCLIEvent("intent.complete", nil)
 	fmt.Fprintln(stdout, "")
 	fmt.Fprintln(stdout, absOutput)
 	return nil

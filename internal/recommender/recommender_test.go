@@ -198,21 +198,36 @@ func TestRecommendMatchesCorpusAndBuildsExactRecommendation(t *testing.T) {
 	if recommendationReport.BaselinePrediction == nil || recommendationReport.BaselinePrediction.ThroughputTokensPerSecond != 4200 {
 		t.Fatalf("expected exact corpus baseline, got %+v", recommendationReport.BaselinePrediction)
 	}
-	if len(recommendationReport.Recommendations) != 1 {
-		t.Fatalf("expected one recommendation, got %+v", recommendationReport.Recommendations)
+	if len(recommendationReport.Recommendations) != 2 {
+		t.Fatalf("expected issue-linked recommendations, got %+v", recommendationReport.Recommendations)
 	}
 	rec := recommendationReport.Recommendations[0]
-	if !strings.Contains(rec.Summary, "max_num_seqs=16") {
-		t.Fatalf("expected concise exact summary, got %q", rec.Summary)
+	if rec.IssueID != "underutilized_gpu_or_conservative_batching" {
+		t.Fatalf("expected top issue-linked recommendation, got %+v", rec)
+	}
+	if rec.RecommendationSource != model.RecommendationSourceHybrid {
+		t.Fatalf("expected near corpus calibration to produce hybrid recommendation, got %+v", rec)
+	}
+	if rec.ActionKind != model.RecommendationActionKindParameterChange {
+		t.Fatalf("expected parameter-change recommendation, got %+v", rec)
+	}
+	if !strings.Contains(rec.Summary, "max_num_seqs=10") {
+		t.Fatalf("expected rule-first summary, got %q", rec.Summary)
 	}
 	if len(rec.Changes) != 2 {
 		t.Fatalf("expected exact parameter changes, got %+v", rec.Changes)
+	}
+	if rec.SharedActionID == "" {
+		t.Fatalf("expected shared_action_id, got %+v", rec)
 	}
 	if rec.PredictedEffect.ThroughputDeltaPct <= 0 {
 		t.Fatalf("expected positive throughput delta, got %+v", rec.PredictedEffect)
 	}
 	if recommendationReport.CapacityOpportunity == nil {
 		t.Fatalf("expected capacity opportunity")
+	}
+	if recommendationReport.CapacityOpportunity.EstimateMode != "benchmark_calibrated" {
+		t.Fatalf("expected benchmark-calibrated headroom, got %+v", recommendationReport.CapacityOpportunity)
 	}
 	if recommendationReport.CapacityOpportunity.RecoverableGPULoadPct <= 0 {
 		t.Fatalf("expected positive recoverable gpu load, got %+v", recommendationReport.CapacityOpportunity)
@@ -228,64 +243,43 @@ func TestRecommendMatchesCorpusAndBuildsExactRecommendation(t *testing.T) {
 	}
 }
 
-func TestRecommendAddsAlternativeBenchmarkBackedRecommendations(t *testing.T) {
+func TestRecommendBuildsIssueLinkedRecommendationsWithSharedActionIDs(t *testing.T) {
 	tmp := t.TempDir()
 	analysisPath := filepath.Join(tmp, "analysis.json")
-	corpusPath := filepath.Join(tmp, "corpus.json")
 
-	mustWriteJSON(t, analysisPath, throughputHeadroomAnalysisReport())
-	mustWriteFile(t, corpusPath, `{
-  "version": "2026-03-21",
-  "profiles": [
-    {
-      "id": "qwen3-30b-h100x4-throughput",
-      "model_name": "Qwen 3 30B A3B",
-      "model_family": "qwen3",
-      "gpu_count": 4,
-      "hardware_class": "h100",
-      "workload_class": "throughput_headroom",
-      "measurements": [
-        {
-          "parameters": {"max_num_seqs": 8, "max_num_batched_tokens": 8192},
-          "metrics": {"throughput_tokens_per_second": 4200, "ttft_ms": 620, "latency_p50_ms": 1450, "latency_p95_ms": 2100, "gpu_utilization_pct": 24}
-        },
-        {
-          "parameters": {"max_num_seqs": 16, "max_num_batched_tokens": 16384},
-          "metrics": {"throughput_tokens_per_second": 6100, "ttft_ms": 760, "latency_p50_ms": 1650, "latency_p95_ms": 2440, "gpu_utilization_pct": 44}
-        }
-      ]
-    },
-    {
-      "id": "qwen3-30b-h100x4-balanced",
-      "model_name": "Qwen 3 30B A3B",
-      "model_family": "qwen3",
-      "gpu_count": 4,
-      "hardware_class": "h100",
-      "workload_class": "balanced",
-      "measurements": [
-        {
-          "parameters": {"max_num_seqs": 8, "max_num_batched_tokens": 8192},
-          "metrics": {"throughput_tokens_per_second": 4200, "ttft_ms": 620, "latency_p50_ms": 1450, "latency_p95_ms": 2100, "gpu_utilization_pct": 24}
-        },
-        {
-          "parameters": {"max_num_seqs": 12, "max_num_batched_tokens": 12288},
-          "metrics": {"throughput_tokens_per_second": 5200, "ttft_ms": 690, "latency_p50_ms": 1520, "latency_p95_ms": 2250, "gpu_utilization_pct": 33}
-        }
-      ]
-    }
-  ]
-}`)
+	report := throughputHeadroomAnalysisReport()
+	report.AnalysisSummary.Findings = []model.Finding{
+		{
+			ID:         "queue_dominated_ttft",
+			Category:   "latency",
+			Status:     model.FindingStatusPresent,
+			Severity:   model.SeverityHigh,
+			Confidence: 0.84,
+			Rank:       1,
+			Summary:    "Queue time is the dominant contributor to TTFT.",
+		},
+		{
+			ID:                      "underutilized_gpu_or_conservative_batching",
+			Category:                "utilization",
+			Status:                  model.FindingStatusPresent,
+			Severity:                model.SeverityHigh,
+			Confidence:              0.86,
+			Rank:                    2,
+			HeuristicImprovementPct: 18,
+			Summary:                 "Traffic was present, but GPU utilization stayed low with little queueing.",
+		},
+	}
+	mustWriteJSON(t, analysisPath, report)
 
 	recommendationReport, err := Recommend(context.Background(), Options{
 		AnalysisPath: analysisPath,
-		CorpusPath:   corpusPath,
 		Objective:    ThroughputFirstObjective,
 	})
 	if err != nil {
 		t.Fatalf("recommend returned error: %v", err)
 	}
 	if len(recommendationReport.Recommendations) != 2 {
-		t.Fatalf("expected two benchmark-backed recommendations, got %+v", recommendationReport.Recommendations)
+		t.Fatalf("expected two issue-linked recommendations, got %+v", recommendationReport.Recommendations)
 	}
 	if recommendationReport.Recommendations[0].Priority != 1 || recommendationReport.Recommendations[1].Priority != 2 {
 		t.Fatalf("expected sequential priorities, got %+v", recommendationReport.Recommendations)
@@ -293,8 +287,11 @@ func TestRecommendAddsAlternativeBenchmarkBackedRecommendations(t *testing.T) {
 	if recommendationReport.AlternativeActions == nil || len(recommendationReport.AlternativeActions) != 1 {
 		t.Fatalf("expected one alternative action summary, got %+v", recommendationReport.AlternativeActions)
 	}
-	if !strings.Contains(recommendationReport.Recommendations[1].Basis, "qwen3-30b-h100x4-balanced") {
-		t.Fatalf("expected alternative recommendation to reference second profile, got %+v", recommendationReport.Recommendations[1])
+	if recommendationReport.Recommendations[0].IssueID != "queue_dominated_ttft" {
+		t.Fatalf("expected first recommendation to follow issue ranking, got %+v", recommendationReport.Recommendations[0])
+	}
+	if recommendationReport.Recommendations[0].SharedActionID == "" || recommendationReport.Recommendations[0].SharedActionID != recommendationReport.Recommendations[1].SharedActionID {
+		t.Fatalf("expected shared_action_id for identical rollout actions, got %+v", recommendationReport.Recommendations)
 	}
 }
 
@@ -359,14 +356,29 @@ func TestRecommendFallsBackWithoutCorpusMatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recommend returned error: %v", err)
 	}
-	if len(recommendationReport.Recommendations) != 1 {
-		t.Fatalf("expected fallback recommendation, got %+v", recommendationReport.Recommendations)
+	if len(recommendationReport.Recommendations) == 0 {
+		t.Fatalf("expected deterministic rule recommendations, got %+v", recommendationReport.Recommendations)
 	}
-	if !strings.Contains(recommendationReport.Recommendations[0].Basis, "Rule-based fallback") {
-		t.Fatalf("expected fallback basis, got %+v", recommendationReport.Recommendations[0])
+	if recommendationReport.Recommendations[0].RecommendationSource != model.RecommendationSourceRule {
+		t.Fatalf("expected rule-only recommendation source, got %+v", recommendationReport.Recommendations[0])
+	}
+	if recommendationReport.MatchedCorpusProfile != nil {
+		t.Fatalf("expected no matched corpus profile without corpus input, got %+v", recommendationReport.MatchedCorpusProfile)
+	}
+	if strings.Contains(strings.Join(recommendationReport.Warnings, " "), "corpus") {
+		t.Fatalf("did not expect missing corpus to be treated as a warning, got %+v", recommendationReport.Warnings)
 	}
 	if recommendationReport.PrimaryAction == nil || recommendationReport.PrimaryAction.Confidence <= 0 {
-		t.Fatalf("expected summary action even for fallback json output, got %+v", recommendationReport.PrimaryAction)
+		t.Fatalf("expected summary action for rule-only output, got %+v", recommendationReport.PrimaryAction)
+	}
+	if recommendationReport.WastedCapacity == nil || recommendationReport.WastedCapacity.ThroughputGapRPS == nil {
+		t.Fatalf("expected rule-only output to headline req/s headroom, got %+v", recommendationReport.WastedCapacity)
+	}
+	if recommendationReport.CapacityOpportunity == nil || recommendationReport.PredictedImpact == nil || recommendationReport.PredictedImpact.GPUUtilizationPct.After == nil {
+		t.Fatalf("expected capacity opportunity-backed gpu impact, got headroom=%+v impact=%+v", recommendationReport.CapacityOpportunity, recommendationReport.PredictedImpact)
+	}
+	if *recommendationReport.PredictedImpact.GPUUtilizationPct.After != recommendationReport.CapacityOpportunity.PredictedOptimalGPULoadPct {
+		t.Fatalf("expected gpu impact to use the same point estimate as capacity headroom, got %+v vs %+v", recommendationReport.PredictedImpact.GPUUtilizationPct, recommendationReport.CapacityOpportunity)
 	}
 }
 
@@ -407,6 +419,9 @@ func TestRecommendAddsPrefixCacheToggleWhenDeclaredReuseIsHigh(t *testing.T) {
 			continue
 		}
 		found = true
+		if item.IssueID != "prefix_cache_ineffective" || item.ActionKind != model.RecommendationActionKindParameterChange {
+			t.Fatalf("expected issue-linked parameter change, got %+v", item)
+		}
 		if len(item.Changes) != 1 || item.Changes[0].Name != "enable_prefix_caching" || item.Changes[0].RecommendedValue != true {
 			t.Fatalf("expected prefix cache toggle change, got %+v", item.Changes)
 		}
@@ -416,25 +431,21 @@ func TestRecommendAddsPrefixCacheToggleWhenDeclaredReuseIsHigh(t *testing.T) {
 	}
 }
 
-func TestRecommendAddsMultimodalCacheToggleWhenDeclaredReuseIsHigh(t *testing.T) {
+func TestRecommendEmitsOperationalRecommendationForCPUBottleneck(t *testing.T) {
 	tmp := t.TempDir()
 	analysisPath := filepath.Join(tmp, "analysis.json")
 
 	report := throughputHeadroomAnalysisReport()
-	report.WorkloadProfile = &model.WorkloadProfile{
-		SchemaVersion:  model.WorkloadProfileSchemaVersion,
-		Source:         model.WorkloadProfileSourceUserInput,
-		ServingPattern: model.ServingPatternRealtimeChat,
-		Objective:      string(BalancedObjective),
-		PrefixReuse:    model.WorkloadProfileReuseUnknown,
-		MediaReuse:     model.WorkloadProfileReuseHigh,
-	}
-	report.CurrentVLLMConfigurations["model_name"] = "Qwen2-VL-7B-Instruct"
-	report.CurrentVLLMConfigurations["disable_mm_preprocessor_cache"] = true
-	report.FeatureSummary = &model.FeatureSummary{
-		TrafficObserved:      true,
-		MultimodalLikely:     true,
-		AvgGPUUtilizationPct: 22,
+	report.AnalysisSummary.Findings = []model.Finding{
+		{
+			ID:         "cpu_or_host_bottleneck",
+			Category:   "host",
+			Status:     model.FindingStatusPresent,
+			Severity:   model.SeverityHigh,
+			Confidence: 0.88,
+			Rank:       1,
+			Summary:    "Host-side work appears to limit throughput before GPU saturation.",
+		},
 	}
 	mustWriteJSON(t, analysisPath, report)
 
@@ -446,16 +457,64 @@ func TestRecommendAddsMultimodalCacheToggleWhenDeclaredReuseIsHigh(t *testing.T)
 	}
 	found := false
 	for _, item := range recommendationReport.Recommendations {
-		if item.ID != "rule_enable_mm_preprocessor_cache" {
+		if item.IssueID != "cpu_or_host_bottleneck" {
 			continue
 		}
 		found = true
-		if len(item.Changes) != 1 || item.Changes[0].Name != "disable_mm_preprocessor_cache" || item.Changes[0].RecommendedValue != false {
-			t.Fatalf("expected multimodal cache toggle change, got %+v", item.Changes)
+		if item.ActionKind != model.RecommendationActionKindOperational || len(item.Changes) != 0 {
+			t.Fatalf("expected operational recommendation without exact knob changes, got %+v", item)
 		}
 	}
 	if !found {
-		t.Fatalf("expected multimodal cache recommendation, got %+v", recommendationReport.Recommendations)
+		t.Fatalf("expected CPU bottleneck recommendation, got %+v", recommendationReport.Recommendations)
+	}
+}
+
+func TestRecommendKeepsRuleOutputWhenCorpusIsNotNear(t *testing.T) {
+	tmp := t.TempDir()
+	analysisPath := filepath.Join(tmp, "analysis.json")
+	corpusPath := filepath.Join(tmp, "corpus.json")
+
+	mustWriteJSON(t, analysisPath, throughputHeadroomAnalysisReport())
+	mustWriteFile(t, corpusPath, `{
+  "version": "2026-03-21",
+  "profiles": [
+    {
+      "id": "qwen3-30b-a100x8-throughput",
+      "model_name": "Qwen 3 30B A3B",
+      "model_family": "qwen3",
+      "gpu_count": 8,
+      "hardware_class": "a100",
+      "workload_class": "throughput_headroom",
+      "measurements": [
+        {
+          "parameters": {"max_num_seqs": 8, "max_num_batched_tokens": 8192},
+          "metrics": {"throughput_tokens_per_second": 4200, "ttft_ms": 620, "latency_p50_ms": 1450, "latency_p95_ms": 2100, "gpu_utilization_pct": 24}
+        }
+      ]
+    }
+  ]
+}`)
+
+	recommendationReport, err := Recommend(context.Background(), Options{
+		AnalysisPath: analysisPath,
+		CorpusPath:   corpusPath,
+		Objective:    ThroughputFirstObjective,
+	})
+	if err != nil {
+		t.Fatalf("recommend returned error: %v", err)
+	}
+	if len(recommendationReport.Recommendations) == 0 {
+		t.Fatalf("expected rule output to remain present, got %+v", recommendationReport)
+	}
+	if recommendationReport.MatchedCorpusProfile != nil {
+		t.Fatalf("expected far corpus to stay out of matched benchmark profile, got %+v", recommendationReport.MatchedCorpusProfile)
+	}
+	if recommendationReport.Recommendations[0].RecommendationSource != model.RecommendationSourceRule {
+		t.Fatalf("expected far corpus not to suppress rule output, got %+v", recommendationReport.Recommendations[0])
+	}
+	if len(recommendationReport.Warnings) != 0 {
+		t.Fatalf("did not expect calibration absence to be surfaced as a warning, got %+v", recommendationReport.Warnings)
 	}
 }
 
@@ -479,10 +538,16 @@ func TestBuildCapacityOpportunityOmitsBlockWithoutPredictedGPUUtilization(t *tes
 	if got == nil {
 		t.Fatalf("expected fallback capacity opportunity when throughput uplift is available")
 	}
+	if got.EstimateMode != "conservative_rule_range" {
+		t.Fatalf("expected conservative range headroom mode, got %+v", got)
+	}
 	if got.RecoverableGPULoadPct <= 0 || got.RecoverableGPUCount <= 0 {
 		t.Fatalf("expected positive derived gpu headroom, got %+v", got)
 	}
-	if !strings.Contains(got.Basis, "Estimated GPU utilization from predicted throughput uplift") {
+	if got.RecoverableGPULoadPctHigh == nil || got.RecoverableGPULoadPctLow == nil || *got.RecoverableGPULoadPctHigh <= *got.RecoverableGPULoadPctLow {
+		t.Fatalf("expected conservative range bounds, got %+v", got)
+	}
+	if !strings.Contains(got.Basis, "Estimated GPU utilization from predicted throughput uplift.") {
 		t.Fatalf("expected derived basis note, got %+v", got)
 	}
 }
@@ -533,8 +598,8 @@ func TestRecommendPreservesCanonicalOutputWhenLLMEnhancementFails(t *testing.T) 
 	if err != nil {
 		t.Fatalf("recommend returned error: %v", err)
 	}
-	if len(recommendationReport.Recommendations) != 1 {
-		t.Fatalf("expected canonical recommendation to remain present, got %+v", recommendationReport.Recommendations)
+	if len(recommendationReport.Recommendations) == 0 {
+		t.Fatalf("expected canonical recommendations to remain present, got %+v", recommendationReport.Recommendations)
 	}
 	if recommendationReport.LLMEnhanced != nil {
 		t.Fatalf("expected llm_enhanced to remain nil on failure, got %+v", recommendationReport.LLMEnhanced)

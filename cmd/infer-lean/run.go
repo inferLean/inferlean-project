@@ -12,24 +12,34 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/inferLean/inferlean-project/internal/model"
 )
 
 const (
-	defaultInferleanBaseURL = "https://app.inferlean.com"
-	inferleanBaseURLEnv     = "INFERLEAN_BASE_URL"
-	inferleanAuthTokenEnv   = "INFERLEAN_AUTH_TOKEN"
+	defaultInferleanBaseURL  = "https://app.inferlean.com"
+	inferleanBaseURLEnv      = "INFERLEAN_BASE_URL"
+	inferleanAuthTokenEnv    = "INFERLEAN_AUTH_TOKEN"
+	defaultAnalysisETA       = 60 * time.Second
+	defaultRecommendationETA = 45 * time.Second
 )
 
 var (
 	openDashboardInBrowser = openBrowserURL
 	runPollInterval        = 3 * time.Second
 	runPollTimeout         = 15 * time.Minute
+	errArtifactWaitTimeout = errors.New("artifact wait timeout")
+	runCollectForRun       = runCollectWithContext
+	runNotifyInterrupt     = func(ch chan<- os.Signal) { signal.Notify(ch, os.Interrupt) }
+	runStopInterruptNotify = func(ch chan<- os.Signal) { signal.Stop(ch) }
 )
 
 type triggerJobAPIResponse struct {
@@ -50,6 +60,21 @@ type topRecommendationAPIResponse struct {
 
 type backendErrorPayload struct {
 	Error string `json:"error"`
+}
+
+type waitStage string
+
+const (
+	waitStageAnalysis       waitStage = "analysis"
+	waitStageRecommendation waitStage = "recommendation"
+)
+
+type waitProgressUpdate struct {
+	Stage    waitStage
+	Progress float64
+	Elapsed  time.Duration
+	ETA      time.Duration
+	Done     bool
 }
 
 type stringOrNumber string
@@ -80,10 +105,12 @@ func runEndToEnd(args []string, stdout, stderr io.Writer) error {
 	if len(args) > 0 {
 		switch strings.TrimSpace(args[0]) {
 		case "-h", "--help", "help":
+			recordCLIEvent("run.help", nil)
 			printRunUsage(stderr)
 			return errHelpRequested
 		}
 	}
+	recordCLIEvent("run.start", nil)
 
 	baseURL, err := resolveInferleanBaseURL(os.Getenv(inferleanBaseURLEnv))
 	if err != nil {
@@ -101,13 +128,65 @@ func runEndToEnd(args []string, stdout, stderr io.Writer) error {
 	collectorPath := filepath.Join(tmpDir, "collector-report.json")
 	collectArgs := append([]string{}, args...)
 	collectArgs = append(collectArgs, "--output", collectorPath, "--plain-output")
+	collectStepSeconds := resolveCollectStepSeconds(args)
+	collectCtx, cancelCollect := context.WithCancel(context.Background())
+	defer cancelCollect()
+	interruptCh := make(chan os.Signal, 1)
+	runNotifyInterrupt(interruptCh)
+	var collectInterrupted atomic.Bool
+	stopInterruptListener := make(chan struct{})
+	var interruptCleanupOnce sync.Once
+	cleanupCollectionInterrupt := func() {
+		interruptCleanupOnce.Do(func() {
+			runStopInterruptNotify(interruptCh)
+			close(stopInterruptListener)
+		})
+	}
+	defer cleanupCollectionInterrupt()
+	go func() {
+		select {
+		case <-stopInterruptListener:
+			return
+		case <-interruptCh:
+			collectInterrupted.Store(true)
+			cancelCollect()
+		}
+	}()
 
+	var collectionProgress *terminalProgressBar
 	if ui.Enabled() {
 		ui.Step("Collecting runtime metrics...")
+		collectionProgress = ui.StartProgress("Collecting data")
 	}
-	if err := runCollect(collectArgs, io.Discard, stderr); err != nil {
+	recordCLIEvent("run.collect.start", nil)
+	if err := runCollectForRun(collectCtx, collectArgs, io.Discard, stderr, collectRunOptions{
+		progressCallback: func(update CollectionProgressUpdate) {
+			if collectionProgress == nil {
+				return
+			}
+			collectionProgress.Update(update.Progress, update.Remaining, fmt.Sprintf("sampling every %ds", collectStepSeconds))
+		},
+	}); err != nil {
+		if collectionProgress != nil {
+			collectionProgress.Fail("collection failed")
+		}
 		return fmt.Errorf("collect failed: %w", err)
 	}
+	if collectionProgress != nil {
+		if collectInterrupted.Load() {
+			collectionProgress.Complete("interrupted; using collected data so far")
+		} else {
+			collectionProgress.Complete("collection complete")
+		}
+	}
+	if collectInterrupted.Load() {
+		if ui.Enabled() {
+			ui.Step("Collection interrupted by user; continuing with partial data.")
+		}
+		recordCLIEvent("run.collect.interrupted", nil)
+	}
+	recordCLIEvent("run.collect.complete", nil)
+	cleanupCollectionInterrupt()
 
 	payload, err := os.ReadFile(collectorPath)
 	if err != nil {
@@ -116,6 +195,7 @@ func runEndToEnd(args []string, stdout, stderr io.Writer) error {
 	if ui.Enabled() {
 		ui.Step("Triggering backend job...")
 	}
+	recordCLIEvent("run.trigger.start", nil)
 	triggerResponse, err := triggerJob(baseURL, payload, authToken)
 	if err != nil {
 		if isTriggerNetworkError(err) {
@@ -127,20 +207,61 @@ func runEndToEnd(args []string, stdout, stderr io.Writer) error {
 			fmt.Fprintln(stderr, "warning: automatic backend trigger failed due to a network issue.")
 			fmt.Fprintf(stderr, "collector JSON saved for manual upload: %s\n", manualUploadPath)
 			fmt.Fprintf(stderr, "open %s and upload the saved file manually.\n", triggerPage)
+			recordCLIEvent("run.trigger.network_fallback", nil)
 			return nil
 		}
 		return err
 	}
+	recordCLIEvent("run.trigger.complete", nil)
 
 	dashboardURL := fmt.Sprintf("%s/jobs/%s", baseURL, url.PathEscape(triggerResponse.ID))
 	fmt.Fprintf(stdout, "Job queued: %s\n", triggerResponse.ID)
 	if ui.Enabled() {
 		ui.Step("Waiting for analysis and recommendation...")
 	}
-	analysisReport, topRecommendation, err := waitForJobCompletion(baseURL, triggerResponse.ID, authToken)
+	var analysisProgress *terminalProgressBar
+	var recommendationProgress *terminalProgressBar
+	recordCLIEvent("run.wait.start", nil)
+	analysisReport, topRecommendation, err := waitForJobCompletion(baseURL, triggerResponse.ID, authToken, func(update waitProgressUpdate) {
+		if !ui.Enabled() {
+			return
+		}
+		switch update.Stage {
+		case waitStageAnalysis:
+			if analysisProgress == nil {
+				analysisProgress = ui.StartProgress("Analyzing")
+			}
+			if analysisProgress == nil {
+				return
+			}
+			if update.Done {
+				analysisProgress.Complete("analysis complete")
+				return
+			}
+			analysisProgress.Update(update.Progress, update.ETA, fmt.Sprintf("elapsed %s", formatProgressETA(update.Elapsed)))
+		case waitStageRecommendation:
+			if recommendationProgress == nil {
+				recommendationProgress = ui.StartProgress("Generating recommendation")
+			}
+			if recommendationProgress == nil {
+				return
+			}
+			if update.Done {
+				recommendationProgress.Complete("recommendation ready")
+				return
+			}
+			recommendationProgress.Update(update.Progress, update.ETA, fmt.Sprintf("elapsed %s", formatProgressETA(update.Elapsed)))
+		}
+	})
 	if err != nil {
+		if recommendationProgress != nil {
+			recommendationProgress.Fail("recommendation failed")
+		} else if analysisProgress != nil {
+			analysisProgress.Fail("analysis failed")
+		}
 		return fmt.Errorf("wait for job completion: %w", err)
 	}
+	recordCLIEvent("run.wait.complete", nil)
 
 	topIssue := topIssueSummary(analysisReport)
 	if summary := strings.TrimSpace(topRecommendation.TopIssue); summary != "" {
@@ -159,11 +280,13 @@ func runEndToEnd(args []string, stdout, stderr io.Writer) error {
 
 	if err := openDashboardInBrowser(dashboardURL); err != nil {
 		fmt.Fprintf(stderr, "warning: unable to open browser automatically: %v\n", err)
+		recordCLIEvent("run.dashboard.open_failed", nil)
 		return nil
 	}
 	if ui.Enabled() {
 		ui.Step("Dashboard opened in browser")
 	}
+	recordCLIEvent("run.complete", nil)
 	return nil
 }
 
@@ -181,6 +304,38 @@ func printRunUsage(w io.Writer) {
 	fmt.Fprintf(w, "  %s=<bearer token> (optional, used for authenticated backend routes)\n", inferleanAuthTokenEnv)
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "All collect flags are accepted by run.")
+}
+
+func resolveCollectStepSeconds(args []string) int {
+	step := defaultPrometheusStepSeconds
+	for index := 0; index < len(args); index++ {
+		arg := strings.TrimSpace(args[index])
+		if arg == "" {
+			continue
+		}
+		if arg == "--prometheus-step-seconds" {
+			if index+1 >= len(args) {
+				continue
+			}
+			value, err := strconv.Atoi(strings.TrimSpace(args[index+1]))
+			if err == nil && value > 0 {
+				step = value
+			}
+			index++
+			continue
+		}
+		if strings.HasPrefix(arg, "--prometheus-step-seconds=") {
+			raw := strings.TrimSpace(strings.TrimPrefix(arg, "--prometheus-step-seconds="))
+			value, err := strconv.Atoi(raw)
+			if err == nil && value > 0 {
+				step = value
+			}
+		}
+	}
+	if step <= 0 {
+		return defaultPrometheusStepSeconds
+	}
+	return step
 }
 
 func resolveInferleanBaseURL(raw string) (string, error) {
@@ -245,7 +400,7 @@ func triggerJob(baseURL string, collectorPayload []byte, authToken string) (*tri
 	return &out, nil
 }
 
-func waitForJobCompletion(baseURL, jobID, authToken string) (*model.AnalysisReport, *topRecommendationAPIResponse, error) {
+func waitForJobCompletion(baseURL, jobID, authToken string, progressCallback func(waitProgressUpdate)) (*model.AnalysisReport, *topRecommendationAPIResponse, error) {
 	jobID = strings.TrimSpace(jobID)
 	if jobID == "" {
 		return nil, nil, errors.New("job id is required")
@@ -257,42 +412,106 @@ func waitForJobCompletion(baseURL, jobID, authToken string) (*model.AnalysisRepo
 	deadline := time.Now().Add(runPollTimeout)
 	analysisURL := fmt.Sprintf("%s/api/v1/jobs/%s/analysis", baseURL, url.PathEscape(jobID))
 	topRecommendationURL := fmt.Sprintf("%s/api/v1/jobs/%s/top-recommendation", baseURL, url.PathEscape(jobID))
+	var analysis model.AnalysisReport
+	if err := waitForArtifact(
+		analysisURL,
+		authToken,
+		deadline,
+		defaultAnalysisETA,
+		&analysis,
+		func(progress float64, elapsed, eta time.Duration, done bool) {
+			if progressCallback == nil {
+				return
+			}
+			progressCallback(waitProgressUpdate{
+				Stage:    waitStageAnalysis,
+				Progress: progress,
+				Elapsed:  elapsed,
+				ETA:      eta,
+				Done:     done,
+			})
+		},
+	); err != nil {
+		if errors.Is(err, errArtifactWaitTimeout) {
+			return nil, nil, fmt.Errorf("timed out waiting for analysis/recommendation for job %s", jobID)
+		}
+		return nil, nil, fmt.Errorf("fetch analysis: %w", err)
+	}
 
-	var (
-		analysis          *model.AnalysisReport
-		topRecommendation *topRecommendationAPIResponse
-	)
+	var recommendation topRecommendationAPIResponse
+	if err := waitForArtifact(
+		topRecommendationURL,
+		authToken,
+		deadline,
+		defaultRecommendationETA,
+		&recommendation,
+		func(progress float64, elapsed, eta time.Duration, done bool) {
+			if progressCallback == nil {
+				return
+			}
+			progressCallback(waitProgressUpdate{
+				Stage:    waitStageRecommendation,
+				Progress: progress,
+				Elapsed:  elapsed,
+				ETA:      eta,
+				Done:     done,
+			})
+		},
+	); err != nil {
+		if errors.Is(err, errArtifactWaitTimeout) {
+			return nil, nil, fmt.Errorf("timed out waiting for analysis/recommendation for job %s", jobID)
+		}
+		return nil, nil, fmt.Errorf("fetch recommendation: %w", err)
+	}
+
+	return &analysis, &recommendation, nil
+}
+
+func waitForArtifact(endpoint, authToken string, deadline time.Time, expectedDuration time.Duration, out any, onProgress func(progress float64, elapsed, eta time.Duration, done bool)) error {
+	start := time.Now()
+	if onProgress != nil {
+		progress, eta := estimateStageProgress(0, expectedDuration)
+		onProgress(progress, 0, eta, false)
+	}
 	for {
-		if analysis == nil {
-			var report model.AnalysisReport
-			pending, err := fetchPendingJSONArtifact(analysisURL, authToken, &report)
-			if err != nil {
-				return nil, nil, fmt.Errorf("fetch analysis: %w", err)
-			}
-			if !pending {
-				analysis = &report
-			}
+		pending, err := fetchPendingJSONArtifact(endpoint, authToken, out)
+		if err != nil {
+			return err
 		}
-
-		if topRecommendation == nil {
-			var report topRecommendationAPIResponse
-			pending, err := fetchPendingJSONArtifact(topRecommendationURL, authToken, &report)
-			if err != nil {
-				return nil, nil, fmt.Errorf("fetch recommendation: %w", err)
+		elapsed := time.Since(start)
+		if !pending {
+			if onProgress != nil {
+				onProgress(1, elapsed, 0, true)
 			}
-			if !pending {
-				topRecommendation = &report
-			}
+			return nil
 		}
-
-		if analysis != nil && topRecommendation != nil {
-			return analysis, topRecommendation, nil
+		progress, eta := estimateStageProgress(elapsed, expectedDuration)
+		if onProgress != nil {
+			onProgress(progress, elapsed, eta, false)
 		}
 		if time.Now().After(deadline) {
-			return nil, nil, fmt.Errorf("timed out waiting for analysis/recommendation for job %s", jobID)
+			return errArtifactWaitTimeout
 		}
 		time.Sleep(runPollInterval)
 	}
+}
+
+func estimateStageProgress(elapsed, expected time.Duration) (float64, time.Duration) {
+	if expected <= 0 {
+		expected = 30 * time.Second
+	}
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	if elapsed > expected {
+		return 0.98, runPollInterval
+	}
+	progress := clampFloat(float64(elapsed)/float64(expected), 0, 0.98)
+	eta := expected - elapsed
+	if eta < runPollInterval {
+		eta = runPollInterval
+	}
+	return progress, eta
 }
 
 func fetchPendingJSONArtifact(endpoint, authToken string, out any) (bool, error) {

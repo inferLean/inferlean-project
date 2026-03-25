@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/inferLean/inferlean-project/internal/analyzer"
 	"github.com/inferLean/inferlean-project/internal/model"
 )
 
@@ -78,6 +79,7 @@ type derivedContext struct {
 	GPUCount         int
 	HardwareClass    string
 	WorkloadClass    string
+	Features         analyzer.FeatureSet
 	CurrentConfig    map[string]any
 	CurrentNumeric   map[string]float64
 	ObservedBaseline *model.Prediction

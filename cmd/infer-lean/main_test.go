@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -100,6 +102,22 @@ func TestCollectRejectsInvalidDeploymentType(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "invalid deployment-type") {
 		t.Fatalf("expected deployment validation error, got %q", stderr.String())
+	}
+}
+
+func TestCollectHelpShowsUpdatedCollectionDefaults(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	exitCode := Execute([]string{"collect", "-h"}, stdout, stderr)
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+	help := stderr.String()
+	if !strings.Contains(help, "Prometheus collection duration in minutes (default: 1)") {
+		t.Fatalf("expected updated duration default in help output, got %q", help)
+	}
+	if !strings.Contains(help, "Prometheus query range step in seconds (default: 10)") {
+		t.Fatalf("expected updated step default in help output, got %q", help)
 	}
 }
 
@@ -710,6 +728,128 @@ func TestRunCollectsTriggersAndOpensDashboard(t *testing.T) {
 	}
 }
 
+func TestRunContinuesAfterInterruptDuringCollection(t *testing.T) {
+	var receivedCollector map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/trigger-job":
+			if r.Method != http.MethodPost {
+				t.Fatalf("expected POST, got %s", r.Method)
+			}
+			if err := json.NewDecoder(r.Body).Decode(&receivedCollector); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"job_id":"123","status":"queued"}`))
+		case "/api/v1/jobs/123/analysis":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"schema_version":"v3","diagnosis_summary":{"findings":[]}}`))
+		case "/api/v1/jobs/123/top-recommendation":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"job_id":"123","id":"123","top_recommendation":"Use partial sample tuning."}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	t.Setenv(inferleanBaseURLEnv, server.URL)
+
+	previousCollect := runCollectForRun
+	runCollectForRun = func(ctx context.Context, args []string, stdout, stderr io.Writer, opts collectRunOptions) error {
+		outputPath := ""
+		for i := 0; i < len(args); i++ {
+			if args[i] == "--output" && i+1 < len(args) {
+				outputPath = strings.TrimSpace(args[i+1])
+				break
+			}
+		}
+		if outputPath == "" {
+			return fmt.Errorf("missing --output in collect args")
+		}
+		if opts.progressCallback != nil {
+			opts.progressCallback(CollectionProgressUpdate{
+				Elapsed:   10 * time.Second,
+				Remaining: 50 * time.Second,
+				Total:     60 * time.Second,
+				Progress:  10.0 / 60.0,
+			})
+		}
+		<-ctx.Done()
+		payload := map[string]any{
+			"schema_version": "collector/v1",
+			"collected_metrics": []map[string]any{
+				{
+					"time_label": "2026-03-25T10:00:00Z",
+					"metrics": map[string]any{
+						"request_tps": 5,
+						"latency_ms":  410,
+					},
+				},
+			},
+			"metric_collection_outputs": map[string]any{
+				"collection_interrupted": "true",
+			},
+		}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(outputPath, data, 0o600)
+	}
+	defer func() { runCollectForRun = previousCollect }()
+
+	previousNotify := runNotifyInterrupt
+	previousStopNotify := runStopInterruptNotify
+	runNotifyInterrupt = func(ch chan<- os.Signal) {
+		ch <- os.Interrupt
+	}
+	runStopInterruptNotify = func(ch chan<- os.Signal) {
+		_ = ch
+	}
+	defer func() {
+		runNotifyInterrupt = previousNotify
+		runStopInterruptNotify = previousStopNotify
+	}()
+
+	openCalled := false
+	previousOpen := openDashboardInBrowser
+	openDashboardInBrowser = func(target string) error {
+		openCalled = true
+		_ = target
+		return nil
+	}
+	defer func() { openDashboardInBrowser = previousOpen }()
+
+	previousPollInterval := runPollInterval
+	previousPollTimeout := runPollTimeout
+	runPollInterval = 5 * time.Millisecond
+	runPollTimeout = 2 * time.Second
+	defer func() {
+		runPollInterval = previousPollInterval
+		runPollTimeout = previousPollTimeout
+	}()
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	exitCode := Execute([]string{"run"}, stdout, stderr)
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr=%s", exitCode, stderr.String())
+	}
+	if len(receivedCollector) == 0 {
+		t.Fatalf("expected collector payload to be sent")
+	}
+	if got := strings.TrimSpace(fmt.Sprint(receivedCollector["schema_version"])); got != "collector/v1" {
+		t.Fatalf("expected collector schema_version collector/v1, got %q", got)
+	}
+	if !strings.Contains(stdout.String(), "Top recommendation: Use partial sample tuning.") {
+		t.Fatalf("expected top recommendation in output, got %q", stdout.String())
+	}
+	if !openCalled {
+		t.Fatalf("expected browser open to be attempted")
+	}
+}
+
 func TestRunRejectsInvalidBaseURLFromEnv(t *testing.T) {
 	t.Setenv(inferleanBaseURLEnv, "://bad-url")
 
@@ -831,6 +971,87 @@ func TestRunFallsBackToManualUploadOnNetworkTriggerFailure(t *testing.T) {
 	}
 	if got := strings.TrimSpace(fmt.Sprint(collector["schema_version"])); got != "collector/v1" {
 		t.Fatalf("expected saved collector schema_version collector/v1, got %q", got)
+	}
+}
+
+func TestWaitForJobCompletionReportsStagedProgress(t *testing.T) {
+	analysisCalls := 0
+	recommendationCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/jobs/123/analysis":
+			analysisCalls++
+			w.Header().Set("Content-Type", "application/json")
+			if analysisCalls < 2 {
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = w.Write([]byte(`{"job_id":"123","artifact":"analysis","status":"pending"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"schema_version":"v3","diagnosis_summary":{"findings":[]}}`))
+		case "/api/v1/jobs/123/top-recommendation":
+			recommendationCalls++
+			w.Header().Set("Content-Type", "application/json")
+			if recommendationCalls < 2 {
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = w.Write([]byte(`{"job_id":"123","artifact":"top_recommendation","status":"pending"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"job_id":"123","id":"123","top_recommendation":"Tune max_num_seqs."}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	previousPollInterval := runPollInterval
+	previousPollTimeout := runPollTimeout
+	runPollInterval = 5 * time.Millisecond
+	runPollTimeout = 2 * time.Second
+	defer func() {
+		runPollInterval = previousPollInterval
+		runPollTimeout = previousPollTimeout
+	}()
+
+	updates := make([]waitProgressUpdate, 0, 6)
+	analysis, recommendation, err := waitForJobCompletion(server.URL, "123", "", func(update waitProgressUpdate) {
+		updates = append(updates, update)
+	})
+	if err != nil {
+		t.Fatalf("waitForJobCompletion failed: %v", err)
+	}
+	if analysis == nil {
+		t.Fatalf("expected analysis report")
+	}
+	if recommendation == nil {
+		t.Fatalf("expected recommendation report")
+	}
+
+	stageDoneOrder := make([]waitStage, 0, 2)
+	for _, update := range updates {
+		if update.Done {
+			stageDoneOrder = append(stageDoneOrder, update.Stage)
+		}
+	}
+	if len(stageDoneOrder) < 2 {
+		t.Fatalf("expected done updates for both stages, got %+v", updates)
+	}
+	if stageDoneOrder[0] != waitStageAnalysis || stageDoneOrder[1] != waitStageRecommendation {
+		t.Fatalf("expected analysis then recommendation completion order, got %+v", stageDoneOrder)
+	}
+}
+
+func TestResolveCollectStepSecondsDefaultsAndOverrides(t *testing.T) {
+	if got := resolveCollectStepSeconds(nil); got != defaultPrometheusStepSeconds {
+		t.Fatalf("expected default step %d, got %d", defaultPrometheusStepSeconds, got)
+	}
+	if got := resolveCollectStepSeconds([]string{"--prometheus-step-seconds", "12"}); got != 12 {
+		t.Fatalf("expected step override 12, got %d", got)
+	}
+	if got := resolveCollectStepSeconds([]string{"--prometheus-step-seconds=14"}); got != 14 {
+		t.Fatalf("expected step override 14, got %d", got)
+	}
+	if got := resolveCollectStepSeconds([]string{"--prometheus-step-seconds", "0"}); got != defaultPrometheusStepSeconds {
+		t.Fatalf("expected fallback step %d for invalid override, got %d", defaultPrometheusStepSeconds, got)
 	}
 }
 

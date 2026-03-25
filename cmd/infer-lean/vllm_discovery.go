@@ -3,53 +3,67 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 )
 
-func ensureVLLMDiscovery(ctx context.Context, configPath string) (string, error) {
+type vllmDiscoveryResult struct {
+	ConfigPath    string
+	MetricsTarget string
+	PID           int
+}
+
+func ensureVLLMDiscovery(ctx context.Context, configPath string) (vllmDiscoveryResult, error) {
+	result := vllmDiscoveryResult{}
 	clean := strings.TrimSpace(configPath)
 	if clean != "" {
 		debugf("vLLM discovery: using explicit config path %q", clean)
-		return clean, nil
+		result.ConfigPath = clean
 	}
 
 	debugf("vLLM discovery: detecting running vLLM process")
 	pid := detectVLLMPID(ctx)
 	if pid <= 0 {
-		return "", fmt.Errorf("vLLM was not found on this host; provide the vLLM configuration path using --config-file <path>")
+		if strings.TrimSpace(result.ConfigPath) != "" {
+			debugf("vLLM discovery: no running vLLM process found; continuing with explicit config path")
+			return result, nil
+		}
+		return result, fmt.Errorf("vLLM was not found on this host; provide the vLLM configuration path using --config-file <path>")
 	}
+	result.PID = pid
 	debugf("vLLM discovery: found pid %d", pid)
 
+	if discovered := discoverVLLMMetricsTargetFromVLLMProcess(pid); discovered != "" {
+		result.MetricsTarget = discovered
+		debugf("vLLM discovery: metrics target discovered from process args: %s", discovered)
+	} else {
+		debugf("vLLM discovery: metrics target not found in process args; using default metrics target")
+	}
+
+	if strings.TrimSpace(result.ConfigPath) != "" {
+		return result, nil
+	}
 	if discovered := discoverConfigPathFromVLLMProcess(pid); discovered != "" {
 		debugf("vLLM discovery: config discovered from process args: %s", discovered)
-		return discovered, nil
+		result.ConfigPath = discovered
+		return result, nil
 	}
 	if discovered := discoverConfigPathFromCommonLocations(); discovered != "" {
 		debugf("vLLM discovery: config discovered from common locations: %s", discovered)
-		return discovered, nil
+		result.ConfigPath = discovered
+		return result, nil
 	}
 	debugf("vLLM discovery: no config path discovered; continuing with empty config path")
-	return "", nil
+	return result, nil
 }
 
 func discoverConfigPathFromVLLMProcess(pid int) string {
-	if pid <= 0 {
-		return ""
-	}
-	cmdlinePath := fmt.Sprintf("/proc/%d/cmdline", pid)
-	data, err := os.ReadFile(cmdlinePath)
+	args, err := readProcessArgs(pid)
 	if err != nil {
-		debugf("vLLM discovery: failed reading %s: %v", cmdlinePath, err)
+		debugf("vLLM discovery: failed reading process args for pid %d: %v", pid, err)
 		return ""
-	}
-	raw := strings.Split(string(data), "\x00")
-	args := make([]string, 0, len(raw))
-	for _, item := range raw {
-		item = strings.TrimSpace(item)
-		if item != "" {
-			args = append(args, item)
-		}
 	}
 	return parseConfigPathFromArgs(args)
 }
@@ -74,6 +88,63 @@ func parseConfigPathFromArgs(args []string) string {
 		}
 	}
 	return ""
+}
+
+func discoverVLLMMetricsTargetFromVLLMProcess(pid int) string {
+	args, err := readProcessArgs(pid)
+	if err != nil {
+		debugf("vLLM discovery: failed reading process args for pid %d: %v", pid, err)
+		return ""
+	}
+	return parseVLLMMetricsTargetFromArgs(args)
+}
+
+func parseVLLMMetricsTargetFromArgs(args []string) string {
+	host := ""
+	port := ""
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		if arg == "" {
+			continue
+		}
+		switch {
+		case arg == "--host":
+			if i+1 < len(args) {
+				host = strings.TrimSpace(args[i+1])
+				i++
+			}
+		case strings.HasPrefix(arg, "--host="):
+			host = strings.TrimSpace(strings.TrimPrefix(arg, "--host="))
+		case arg == "--port":
+			if i+1 < len(args) {
+				port = strings.TrimSpace(args[i+1])
+				i++
+			}
+		case strings.HasPrefix(arg, "--port="):
+			port = strings.TrimSpace(strings.TrimPrefix(arg, "--port="))
+		}
+	}
+	if strings.TrimSpace(port) == "" {
+		return ""
+	}
+	portNumber, err := strconv.Atoi(strings.TrimSpace(port))
+	if err != nil || portNumber <= 0 || portNumber > 65535 {
+		return ""
+	}
+	host = normalizeVLLMMetricsHost(host)
+	return net.JoinHostPort(host, strconv.Itoa(portNumber))
+}
+
+func normalizeVLLMMetricsHost(host string) string {
+	host = strings.TrimSpace(strings.Trim(host, `"'`))
+	host = strings.TrimPrefix(host, "[")
+	host = strings.TrimSuffix(host, "]")
+	switch host {
+	case "", "0.0.0.0", "::":
+		return "127.0.0.1"
+	default:
+		return host
+	}
 }
 
 func discoverConfigPathFromCommonLocations() string {

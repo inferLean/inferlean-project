@@ -42,6 +42,14 @@ type PrometheusCollectionOptions struct {
 	BCCBinary                string
 	PySpyBinary              string
 	NSYSBinary               string
+	ProgressCallback         func(CollectionProgressUpdate)
+}
+
+type CollectionProgressUpdate struct {
+	Elapsed   time.Duration
+	Remaining time.Duration
+	Total     time.Duration
+	Progress  float64
 }
 
 type promQuery struct {
@@ -83,10 +91,14 @@ type managedProcess struct {
 }
 
 func collectPrometheusMetrics(ctx context.Context, opts PrometheusCollectionOptions) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	processCtx := context.WithoutCancel(ctx)
 	debugf("prometheus collection: started duration_minutes=%d step_seconds=%d", opts.DurationMinutes, opts.StepSeconds)
 	duration := time.Duration(opts.DurationMinutes) * time.Minute
 	if opts.DurationMinutes <= 0 {
-		duration = 10 * time.Minute
+		duration = time.Duration(defaultCollectionDurationMinutes) * time.Minute
 	}
 	profilingDurationSeconds := opts.ProfilingDurationSeconds
 	if profilingDurationSeconds <= 0 {
@@ -94,7 +106,7 @@ func collectPrometheusMetrics(ctx context.Context, opts PrometheusCollectionOpti
 	}
 	step := time.Duration(opts.StepSeconds) * time.Second
 	if opts.StepSeconds <= 0 {
-		step = 30 * time.Second
+		step = time.Duration(defaultPrometheusStepSeconds) * time.Second
 	}
 	promBinary, err := resolveOrInstallTool(ctx, strings.TrimSpace(opts.PrometheusBinary), toolInstallSpec{
 		Name:           "prometheus",
@@ -191,7 +203,7 @@ func collectPrometheusMetrics(ctx context.Context, opts PrometheusCollectionOpti
 	nodeURL := fmt.Sprintf("http://127.0.0.1:%d/metrics", nodePort)
 	if !endpointReady(ctx, nodeURL) {
 		debugf("prometheus collection: starting node_exporter")
-		proc, err := startProcess(ctx, workDir, "node_exporter", nodeBinary)
+		proc, err := startProcess(processCtx, workDir, "node_exporter", nodeBinary)
 		if err != nil {
 			return "", err
 		}
@@ -240,7 +252,7 @@ func collectPrometheusMetrics(ctx context.Context, opts PrometheusCollectionOpti
 				setDCGMWarning(fmt.Sprintf("dcgm exporter metrics file unavailable; continuing without DCGM metrics: %v", err))
 			} else {
 				debugf("prometheus collection: starting dcgm_exporter with csv=%s", dcgmMetricsCSVPath)
-				proc, err := startProcess(ctx, workDir, "dcgm_exporter", dcgmBinary, "-f", dcgmMetricsCSVPath)
+				proc, err := startProcess(processCtx, workDir, "dcgm_exporter", dcgmBinary, "-f", dcgmMetricsCSVPath)
 				if err != nil {
 					setDCGMWarning(fmt.Sprintf("dcgm exporter failed to start; continuing without DCGM metrics: %v", err))
 				} else {
@@ -264,7 +276,7 @@ func collectPrometheusMetrics(ctx context.Context, opts PrometheusCollectionOpti
 
 	promURL := fmt.Sprintf("http://127.0.0.1:%d", promPort)
 	proc, err := startProcess(
-		ctx,
+		processCtx,
 		workDir,
 		"prometheus",
 		promBinary,
@@ -308,20 +320,63 @@ func collectPrometheusMetrics(ctx context.Context, opts PrometheusCollectionOpti
 	}
 
 	start := time.Now().UTC()
+	samplingInterrupted := false
 	debugf("prometheus collection: sampling started at %s for %s", start.Format(time.RFC3339), duration)
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case <-time.After(duration):
+	reportProgress := func(elapsed time.Duration) {
+		if opts.ProgressCallback == nil {
+			return
+		}
+		if elapsed < 0 {
+			elapsed = 0
+		}
+		if elapsed > duration {
+			elapsed = duration
+		}
+		remaining := duration - elapsed
+		opts.ProgressCallback(CollectionProgressUpdate{
+			Elapsed:   elapsed,
+			Remaining: remaining,
+			Total:     duration,
+			Progress:  clampFloat(float64(elapsed)/float64(duration), 0, 1),
+		})
+	}
+	reportProgress(0)
+	timer := time.NewTimer(duration)
+	ticker := time.NewTicker(1 * time.Second)
+	defer timer.Stop()
+	defer ticker.Stop()
+samplingLoop:
+	for {
+		select {
+		case <-ctx.Done():
+			samplingInterrupted = true
+			break samplingLoop
+		case <-timer.C:
+			reportProgress(duration)
+			break samplingLoop
+		case <-ticker.C:
+			elapsed := time.Since(start)
+			reportProgress(elapsed)
+		}
 	}
 	end := time.Now().UTC()
+	if samplingInterrupted {
+		collectionOutputs["collection_interrupted"] = "true"
+		collectionOutputs["collection_interrupt_reason"] = "sampling stopped by user interrupt; processing collected data so far"
+		debugf("prometheus collection: sampling interrupted by context cancellation")
+	}
 	debugf("prometheus collection: sampling ended at %s", end.Format(time.RFC3339))
+
+	queryCtx := ctx
+	if samplingInterrupted {
+		queryCtx = context.WithoutCancel(ctx)
+	}
 
 	points := map[int64]map[string]float64{}
 	collectedQueries := 0
 	for _, q := range promQueriesForCollection(collectDCGMMetrics) {
 		debugf("prometheus collection: query aggregate metric %s", q.name)
-		values, err := queryPrometheusRange(ctx, promURL, q.expr, start, end, step)
+		values, err := queryPrometheusRange(queryCtx, promURL, q.expr, start, end, step)
 		if err != nil {
 			continue
 		}
@@ -337,7 +392,7 @@ func collectPrometheusMetrics(ctx context.Context, opts PrometheusCollectionOpti
 		}
 	}
 	vllmSeries, err := queryPrometheusMultiMetricRange(
-		ctx,
+		queryCtx,
 		promURL,
 		`{job="vllm",__name__=~"vllm:.*"}`,
 		start,
@@ -359,7 +414,7 @@ func collectPrometheusMetrics(ctx context.Context, opts PrometheusCollectionOpti
 		}
 	}
 	vllmHistogramSeries, err := queryPrometheusLabeledMetricRange(
-		ctx,
+		queryCtx,
 		promURL,
 		`{job="vllm",__name__="vllm:e2e_request_latency_seconds_bucket"}`,
 		start,
@@ -381,7 +436,7 @@ func collectPrometheusMetrics(ctx context.Context, opts PrometheusCollectionOpti
 		}
 	}
 	nodeSeries, err := queryPrometheusLabeledMetricRange(
-		ctx,
+		queryCtx,
 		promURL,
 		`{job="node_exporter"}`,
 		start,
@@ -404,7 +459,7 @@ func collectPrometheusMetrics(ctx context.Context, opts PrometheusCollectionOpti
 	}
 	if collectDCGMMetrics {
 		dcgmSeries, err := queryPrometheusLabeledMetricRange(
-			ctx,
+			queryCtx,
 			promURL,
 			`{job="dcgm_exporter"}`,
 			start,
@@ -446,7 +501,11 @@ func collectPrometheusMetrics(ctx context.Context, opts PrometheusCollectionOpti
 	}
 
 	if collectedQueries == 0 || len(points) == 0 {
-		return "", errors.New("prometheus returned no metric values from node exporter/dcgm exporter/vllm")
+		if samplingInterrupted {
+			collectionOutputs["collection_warning"] = "collection interrupted before Prometheus returned range samples"
+		} else {
+			return "", errors.New("prometheus returned no metric values from node exporter/dcgm exporter/vllm")
+		}
 	}
 	debugf("prometheus collection: built %d timestamp points", len(points))
 

@@ -65,3 +65,46 @@ func TestParseRuntimeConfigFromArgs(t *testing.T) {
 		t.Fatalf("expected served_model_name, got %+v", got)
 	}
 }
+
+func TestParseVLLMMetricsTargetFromArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "port only",
+			args: []string{"vllm", "serve", "Qwen/Qwen3.5-2B", "--port", "8012"},
+			want: "127.0.0.1:8012",
+		},
+		{
+			name: "port equals with wildcard host",
+			args: []string{"vllm", "serve", "Qwen/Qwen3.5-2B", "--host=0.0.0.0", "--port=9001"},
+			want: "127.0.0.1:9001",
+		},
+		{
+			name: "explicit host and port",
+			args: []string{"vllm", "serve", "Qwen/Qwen3.5-2B", "--host", "10.42.0.7", "--port", "8100"},
+			want: "10.42.0.7:8100",
+		},
+		{
+			name: "missing port",
+			args: []string{"vllm", "serve", "Qwen/Qwen3.5-2B", "--host", "127.0.0.1"},
+			want: "",
+		},
+		{
+			name: "invalid port",
+			args: []string{"vllm", "serve", "Qwen/Qwen3.5-2B", "--port", "bad"},
+			want: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseVLLMMetricsTargetFromArgs(tc.args)
+			if got != tc.want {
+				t.Fatalf("expected %q, got %q", tc.want, got)
+			}
+		})
+	}
+}

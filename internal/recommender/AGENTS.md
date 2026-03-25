@@ -4,9 +4,10 @@ This module owns exact tuning proposals and prediction output.
 
 ## Responsibilities
 
-- Consume `AnalysisReport` plus a local benchmark corpus.
-- Match the current workload to the nearest supported corpus profile.
-- Emit concise, exact parameter changes with predicted impact.
+- Consume `AnalysisReport` and optionally a local benchmark corpus.
+- Generate deterministic, issue-linked recommendations from analyzer findings first.
+- Use a near benchmark profile only to calibrate confidence, predicted impact, and headroom when available.
+- Emit concise, exact parameter changes when safe, or operational actions when no safe deterministic knob exists.
 - Support explicit what-if requests via scenario prediction.
 - Optionally add `llm_enhanced` prose, but only as a separate non-canonical block.
 
@@ -22,12 +23,12 @@ The recommender emits `RecommendationReport` with:
 
 - source analysis reference
 - objective
-- matched corpus profile
+- matched corpus profile when a near benchmark calibration exists
 - baseline prediction
-- exact recommendation items
+- issue-linked recommendation items
 - optional scenario prediction
 - optional `llm_enhanced`
-- warnings when falling back or when traffic is insufficient
+- warnings when calibration is unavailable, when traffic is insufficient, or when compatibility data is missing
 
 ## Synthetic input example
 
@@ -167,5 +168,6 @@ Corpus input:
 
 - Exact fixes belong here, not in analyzer output.
 - Keep canonical recommendation fields concise and operational.
-- Only recommend parameters represented in the corpus unless using an explicitly marked fallback path.
-- If no close corpus match exists, lower confidence and state the fallback basis clearly.
+- Emit one recommendation per present analyzer finding.
+- Keep corpus optional; do not treat a missing corpus as a failure mode.
+- If no near corpus match exists, keep the rule-based recommendation and lower confidence instead of suppressing output.

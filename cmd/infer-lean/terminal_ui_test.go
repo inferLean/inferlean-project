@@ -26,7 +26,7 @@ func TestBuildRecommendationSnapshotPromotesPremiumSummary(t *testing.T) {
 			},
 		},
 		WastedCapacity: &model.WastedCapacitySummary{
-			Headline:         "18.0% GPU headroom recoverable (0.7 GPU)",
+			Headline:         "18.0pp GPU load recoverable (0.7 GPU)",
 			GPUHeadroomPct:   ptr(18),
 			GPUHeadroomCount: ptr(0.7),
 		},
@@ -55,13 +55,13 @@ func TestBuildRecommendationSnapshotPromotesPremiumSummary(t *testing.T) {
 
 	snapshot := buildRecommendationSnapshot(nil, recommendation)
 
-	if snapshot.WastedCapacityLabel != "Wasted Capacity" {
+	if snapshot.WastedCapacityLabel != "GPU Load Headroom" {
 		t.Fatalf("expected gpu-led wasted capacity label, got %q", snapshot.WastedCapacityLabel)
 	}
 	if snapshot.TargetGoal != "Latency-priority | keep throughput >= 80% of current" {
 		t.Fatalf("expected target goal summary, got %q", snapshot.TargetGoal)
 	}
-	if snapshot.WastedCapacity != "18.0% | 0.7 GPU recoverable" {
+	if snapshot.WastedCapacity != "18.0pp | 0.7 GPU recoverable" {
 		t.Fatalf("expected wasted capacity headline, got %q", snapshot.WastedCapacity)
 	}
 	if !strings.Contains(snapshot.BestAction, "max_num_batched_tokens=4096") {
@@ -86,9 +86,6 @@ func TestBuildRecommendationSnapshotSuppressesLowConfidenceAction(t *testing.T) 
 			Summary:    "Increase max_num_seqs to 20",
 			Confidence: 0.52,
 		},
-		Warnings: []string{
-			"no close corpus profile match was found; using conservative rule-based fallback",
-		},
 	}
 
 	snapshot := buildRecommendationSnapshot(nil, recommendation)
@@ -102,8 +99,8 @@ func TestBuildRecommendationSnapshotSuppressesLowConfidenceAction(t *testing.T) 
 	if snapshot.BestAction != "" {
 		t.Fatalf("expected low-confidence action to be hidden, got %q", snapshot.BestAction)
 	}
-	if snapshot.Warning != recommendation.Warnings[0] {
-		t.Fatalf("expected warning to be preserved, got %q", snapshot.Warning)
+	if snapshot.Warning != "" {
+		t.Fatalf("expected no warning, got %q", snapshot.Warning)
 	}
 }
 

@@ -4,17 +4,45 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"strings"
 )
 
 var cliInput io.Reader = os.Stdin
 
 func main() {
-	os.Exit(Execute(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(runMain(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func runMain(args []string, stdout, stderr io.Writer) (exitCode int) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			recordRecoveredPanic(recovered, debug.Stack())
+			fmt.Fprintf(stderr, "panic recovered: %v\n", recovered)
+			exitCode = 2
+		}
+	}()
+	return Execute(args, stdout, stderr)
 }
 
 // Execute runs the CLI and returns a process exit code.
 func Execute(args []string, stdout, stderr io.Writer) int {
+	if err := ensureInferleanLocalConfig(); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	tryPushCrashlyticsFile()
+	commandName := classifyCLICommand(args)
+	recordCLIEvent("command.start", map[string]string{"command": commandName})
+	exitCode := executeCLIArgs(args, stdout, stderr)
+	recordCLIEvent("command.finish", map[string]string{
+		"command":   commandName,
+		"exit_code": fmt.Sprintf("%d", exitCode),
+	})
+	return exitCode
+}
+
+func executeCLIArgs(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		if err := runEndToEnd(nil, stdout, stderr); err != nil {
 			if err == errHelpRequested {
@@ -92,6 +120,22 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+func classifyCLICommand(args []string) string {
+	if len(args) == 0 {
+		return "run"
+	}
+	first := strings.TrimSpace(args[0])
+	switch first {
+	case "collect", "analyze", "intent", "recommend", "run", "help", "-h", "--help":
+		return first
+	default:
+		if strings.HasPrefix(first, "-") {
+			return "run"
+		}
+		return "unknown"
+	}
+}
+
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "inferLean")
 	fmt.Fprintln(w, "")
@@ -114,12 +158,12 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --workload-profile-file <path> Optional workload profile JSON/YAML input")
 	fmt.Fprintln(w, "  --intent-file <path>      Optional declared-intent JSON input (same schema as workload-profile)")
 	fmt.Fprintln(w, "  --collect-prometheus      Run prometheus/node_exporter/dcgm-exporter when metrics-file is not provided (default: true)")
-	fmt.Fprintln(w, "  --duration-minutes <int>  Prometheus collection duration in minutes (default: 10)")
-	fmt.Fprintln(w, "  --prometheus-step-seconds Prometheus query range step in seconds (default: 30)")
+	fmt.Fprintf(w, "  --duration-minutes <int>  Prometheus collection duration in minutes (default: %d)\n", defaultCollectionDurationMinutes)
+	fmt.Fprintf(w, "  --prometheus-step-seconds Prometheus query range step in seconds (default: %d)\n", defaultPrometheusStepSeconds)
 	fmt.Fprintln(w, "  --prometheus-bin <path>   Prometheus binary path (empty means auto-install/auto-detect)")
 	fmt.Fprintln(w, "  --node-exporter-bin <path> node_exporter binary path (empty means auto-install/auto-detect)")
 	fmt.Fprintln(w, "  --dcgm-exporter-bin <path> dcgm-exporter binary path (empty means auto-install/auto-detect)")
-	fmt.Fprintln(w, "  --vllm-metrics-target <host:port> vLLM Prometheus target (default: 127.0.0.1:8000)")
+	fmt.Fprintln(w, "  --vllm-metrics-target <host:port> vLLM Prometheus target (default: auto-discovered vLLM port, fallback 127.0.0.1:8000)")
 	fmt.Fprintln(w, "  --vllm-metrics-path <path> vLLM metrics path (default: /metrics)")
 	fmt.Fprintln(w, "  --prometheus-workdir <path> Working directory for temporary Prometheus files (default: temp dir)")
 	fmt.Fprintln(w, "  --plain-output            Disable styled terminal output and print only the report path")
@@ -149,7 +193,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Recommend flags:")
 	fmt.Fprintln(w, "  --analysis-file <path>    Analyzer report JSON to consume (default: analysis-report.json)")
-	fmt.Fprintln(w, "  --corpus-file <path>      Local benchmark corpus JSON file")
+	fmt.Fprintln(w, "  --corpus-file <path>      Optional local benchmark corpus JSON file used for calibration")
 	fmt.Fprintln(w, "  --objective <value>       balanced, throughput_first, or latency_first (default: workload profile or balanced)")
 	fmt.Fprintln(w, "  --set key=value           Explicit what-if parameter override (repeatable)")
 	fmt.Fprintln(w, "  --plain-output            Disable styled terminal output and print only the report path")

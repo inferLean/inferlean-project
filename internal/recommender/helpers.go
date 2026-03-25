@@ -227,7 +227,18 @@ func pctDelta(next, base float64) float64 {
 func numericMap(raw map[string]any) map[string]float64 {
 	out := map[string]float64{}
 	flat := flattenMap(raw)
-	for _, key := range []string{"max_num_seqs", "max_num_batched_tokens", "tensor_parallel_size"} {
+	for _, key := range []string{
+		"max_num_seqs",
+		"max_num_batched_tokens",
+		"tensor_parallel_size",
+		"pipeline_parallel_size",
+		"data_parallel_size",
+		"max_num_partial_prefills",
+		"max_long_partial_prefills",
+		"long_prefill_token_threshold",
+		"gpu_memory_utilization",
+		"stream_interval",
+	} {
 		if value, ok := lookupFloat(flat, key); ok {
 			out[key] = value
 		}

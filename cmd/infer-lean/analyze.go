@@ -18,7 +18,22 @@ import (
 
 var errHelpRequested = errors.New("help requested")
 
+type collectRunOptions struct {
+	progressCallback func(CollectionProgressUpdate)
+}
+
 func runCollect(args []string, stdout, stderr io.Writer) error {
+	return runCollectWithContext(context.Background(), args, stdout, stderr, collectRunOptions{})
+}
+
+func runCollectWithOptions(args []string, stdout, stderr io.Writer, opts collectRunOptions) error {
+	return runCollectWithContext(context.Background(), args, stdout, stderr, opts)
+}
+
+func runCollectWithContext(ctx context.Context, args []string, stdout, stderr io.Writer, opts collectRunOptions) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	fs := flag.NewFlagSet("collect", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
@@ -32,8 +47,8 @@ func runCollect(args []string, stdout, stderr io.Writer) error {
 	workloadProfilePath := fs.String("workload-profile-file", "", "")
 	intentPath := fs.String("intent-file", "", "")
 	collectPrometheus := fs.Bool("collect-prometheus", true, "")
-	durationMinutes := fs.Int("duration-minutes", 10, "")
-	stepSeconds := fs.Int("prometheus-step-seconds", 30, "")
+	durationMinutes := fs.Int("duration-minutes", defaultCollectionDurationMinutes, "")
+	stepSeconds := fs.Int("prometheus-step-seconds", defaultPrometheusStepSeconds, "")
 	prometheusBin := fs.String("prometheus-bin", "", "")
 	nodeExporterBin := fs.String("node-exporter-bin", "", "")
 	dcgmExporterBin := fs.String("dcgm-exporter-bin", "", "")
@@ -66,12 +81,12 @@ func runCollect(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stderr, "  --workload-profile-file <path> Optional workload profile JSON/YAML input")
 		fmt.Fprintln(stderr, "  --intent-file <path>      Optional declared-intent JSON input (same schema as workload-profile)")
 		fmt.Fprintln(stderr, "  --collect-prometheus      Run prometheus/node_exporter/dcgm-exporter for collection when metrics-file is not provided (default: true)")
-		fmt.Fprintln(stderr, "  --duration-minutes <int>  Prometheus collection duration in minutes (default: 10)")
-		fmt.Fprintln(stderr, "  --prometheus-step-seconds Prometheus query range step in seconds (default: 30)")
+		fmt.Fprintf(stderr, "  --duration-minutes <int>  Prometheus collection duration in minutes (default: %d)\n", defaultCollectionDurationMinutes)
+		fmt.Fprintf(stderr, "  --prometheus-step-seconds Prometheus query range step in seconds (default: %d)\n", defaultPrometheusStepSeconds)
 		fmt.Fprintln(stderr, "  --prometheus-bin <path>   Prometheus binary path (empty means auto-install/auto-detect)")
 		fmt.Fprintln(stderr, "  --node-exporter-bin <path> node_exporter binary path (empty means auto-install/auto-detect)")
 		fmt.Fprintln(stderr, "  --dcgm-exporter-bin <path> dcgm-exporter binary path (empty means auto-install/auto-detect)")
-		fmt.Fprintln(stderr, "  --vllm-metrics-target <host:port> vLLM Prometheus target (default: 127.0.0.1:8000)")
+		fmt.Fprintln(stderr, "  --vllm-metrics-target <host:port> vLLM Prometheus target (default: auto-discovered vLLM port, fallback 127.0.0.1:8000)")
 		fmt.Fprintln(stderr, "  --vllm-metrics-path <path> vLLM metrics path (default: /metrics)")
 		fmt.Fprintln(stderr, "  --prometheus-workdir <path> Working directory for temporary Prometheus files (default: temp dir)")
 		fmt.Fprintln(stderr, "  --plain-output            Disable styled terminal output and print only the report path")
@@ -96,8 +111,18 @@ func runCollect(args []string, stdout, stderr io.Writer) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
+	vllmMetricsTargetProvided := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "vllm-metrics-target" {
+			vllmMetricsTargetProvided = true
+		}
+	})
 	configureDebug(*debugMode, stderr)
 	debugf("starting collect command")
+	recordCLIEvent("collect.start", map[string]string{
+		"collect_prometheus": fmt.Sprintf("%t", *collectPrometheus),
+		"profiling_enabled":  fmt.Sprintf("%t", *enableProfiling),
+	})
 	ui := newTerminalUI(stdout, *plainOutput)
 
 	if err := validateDeploymentType(*deploymentType); err != nil {
@@ -119,15 +144,23 @@ func runCollect(args []string, stdout, stderr io.Writer) error {
 	}
 
 	now := time.Now().UTC()
-	discoveredConfigPath, err := ensureVLLMDiscovery(context.Background(), toAbsIfPresent(strings.TrimSpace(*configPath)))
+	recordCLIEvent("collect.discovery.start", nil)
+	discovery, err := ensureVLLMDiscovery(ctx, toAbsIfPresent(strings.TrimSpace(*configPath)))
 	if err != nil {
 		debugf("vLLM discovery failed: %v", err)
 		return err
 	}
-	cleanConfigPath := discoveredConfigPath
+	cleanConfigPath := discovery.ConfigPath
+	resolvedVLLMMetricsTarget := strings.TrimSpace(*vllmMetricsTarget)
+	if !vllmMetricsTargetProvided && strings.TrimSpace(discovery.MetricsTarget) != "" {
+		resolvedVLLMMetricsTarget = strings.TrimSpace(discovery.MetricsTarget)
+		debugf("resolved vLLM metrics target from process discovery: %s", resolvedVLLMMetricsTarget)
+	} else {
+		debugf("resolved vLLM metrics target from flags/defaults: %s", resolvedVLLMMetricsTarget)
+	}
 	debugf("resolved config path: %q", cleanConfigPath)
 	discoveredVersion, err := discoverVLLMVersion(
-		context.Background(),
+		ctx,
 		strings.TrimSpace(*vllmVersion),
 		strings.TrimSpace(*vllmBin),
 		*vllmVersionTimeoutSeconds,
@@ -136,25 +169,48 @@ func runCollect(args []string, stdout, stderr io.Writer) error {
 		debugf("vLLM version discovery failed: %v", err)
 		return err
 	}
+	recordCLIEvent("collect.discovery.complete", nil)
 	if ui.Enabled() {
 		ui.Stepf("vLLM v%s detected", discoveredVersion)
 	}
 	debugf("resolved vLLM version: %s", discoveredVersion)
 	cleanMetricsPath := toAbsIfPresent(strings.TrimSpace(*metricsPath))
-	runtimeConfig := discoverRuntimeVLLMConfig(context.Background())
+	runtimeConfig := discoverRuntimeVLLMConfig(ctx)
 	if cleanMetricsPath == "" && *collectPrometheus {
+		recordCLIEvent("collect.prometheus.start", nil)
 		if ui.Enabled() {
 			ui.Step("Collecting OS, GPU, and vLLM metrics...")
 		}
+		var collectionProgress *terminalProgressBar
+		progressCallback := opts.progressCallback
+		if ui.Enabled() {
+			collectionProgress = ui.StartProgress("Collecting data")
+			localProgress := func(update CollectionProgressUpdate) {
+				if collectionProgress == nil {
+					return
+				}
+				detail := fmt.Sprintf("sampling every %ds", *stepSeconds)
+				collectionProgress.Update(update.Progress, update.Remaining, detail)
+			}
+			if progressCallback == nil {
+				progressCallback = localProgress
+			} else {
+				downstream := progressCallback
+				progressCallback = func(update CollectionProgressUpdate) {
+					localProgress(update)
+					downstream(update)
+				}
+			}
+		}
 		debugf("collecting Prometheus metrics")
-		generatedMetricsPath, err := collectPrometheusMetrics(context.Background(), PrometheusCollectionOptions{
+		generatedMetricsPath, err := collectPrometheusMetrics(ctx, PrometheusCollectionOptions{
 			DurationMinutes:          *durationMinutes,
 			StepSeconds:              *stepSeconds,
 			WorkDir:                  strings.TrimSpace(*prometheusWorkDir),
 			PrometheusBinary:         strings.TrimSpace(*prometheusBin),
 			NodeExporterBinary:       strings.TrimSpace(*nodeExporterBin),
 			DCGMExporterBinary:       strings.TrimSpace(*dcgmExporterBin),
-			VLLMMetricsTarget:        strings.TrimSpace(*vllmMetricsTarget),
+			VLLMMetricsTarget:        resolvedVLLMMetricsTarget,
 			VLLMMetricsPath:          strings.TrimSpace(*vllmMetricsPath),
 			CollectBCC:               *collectBCC,
 			CollectPySpy:             *collectPySpy,
@@ -165,13 +221,21 @@ func runCollect(args []string, stdout, stderr io.Writer) error {
 			BCCBinary:                strings.TrimSpace(*bccBin),
 			PySpyBinary:              strings.TrimSpace(*pySpyBin),
 			NSYSBinary:               strings.TrimSpace(*nsysBin),
+			ProgressCallback:         progressCallback,
 		})
 		if err != nil {
+			if collectionProgress != nil {
+				collectionProgress.Fail("collection failed")
+			}
 			debugf("prometheus collection failed: %v", err)
 			return fmt.Errorf("prometheus collection failed: %w", err)
 		}
+		if collectionProgress != nil {
+			collectionProgress.Complete("collection complete")
+		}
 		cleanMetricsPath = generatedMetricsPath
 		debugf("prometheus metrics written to %s", cleanMetricsPath)
+		recordCLIEvent("collect.prometheus.complete", nil)
 	}
 
 	payload, err := loadCollectorPayload(cleanMetricsPath)
@@ -213,6 +277,7 @@ func runCollect(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	debugf("collector report written to %s", absOutput)
+	recordCLIEvent("collect.complete", nil)
 
 	if ui.Enabled() {
 		ui.Stepf("Collector output saved -> %s", filepath.Base(absOutput))

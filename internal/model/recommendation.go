@@ -5,6 +5,15 @@ import (
 	"time"
 )
 
+const (
+	RecommendationActionKindParameterChange = "parameter_change"
+	RecommendationActionKindOperational     = "operational"
+
+	RecommendationSourceRule      = "rule"
+	RecommendationSourceBenchmark = "benchmark"
+	RecommendationSourceHybrid    = "hybrid"
+)
+
 type SourceAnalysisReference struct {
 	SchemaVersion string    `json:"schema_version"`
 	GeneratedAt   time.Time `json:"generated_at"`
@@ -141,26 +150,40 @@ type PredictedEffect struct {
 }
 
 type RecommendationItem struct {
-	ID               string            `json:"id"`
-	Priority         int               `json:"priority"`
-	Objective        string            `json:"objective"`
-	Summary          string            `json:"summary"`
-	Changes          []ParameterChange `json:"changes,omitempty"`
-	PredictedEffect  PredictedEffect   `json:"predicted_effect"`
-	Confidence       float64           `json:"confidence"`
-	SafetyNotes      []string          `json:"safety_notes,omitempty"`
-	ValidationChecks []string          `json:"validation_checks,omitempty"`
-	Basis            string            `json:"basis"`
+	ID                   string            `json:"id"`
+	Priority             int               `json:"priority"`
+	IssueID              string            `json:"issue_id,omitempty"`
+	IssueSummary         string            `json:"issue_summary,omitempty"`
+	IssueRank            int               `json:"issue_rank,omitempty"`
+	IssueCategory        string            `json:"issue_category,omitempty"`
+	ActionKind           string            `json:"action_kind,omitempty"`
+	RecommendationSource string            `json:"recommendation_source,omitempty"`
+	SharedActionID       string            `json:"shared_action_id,omitempty"`
+	Objective            string            `json:"objective"`
+	Summary              string            `json:"summary"`
+	Changes              []ParameterChange `json:"changes,omitempty"`
+	PredictedEffect      PredictedEffect   `json:"predicted_effect"`
+	Confidence           float64           `json:"confidence"`
+	SafetyNotes          []string          `json:"safety_notes,omitempty"`
+	ValidationChecks     []string          `json:"validation_checks,omitempty"`
+	Basis                string            `json:"basis"`
 }
 
 type CapacityOpportunity struct {
-	CurrentGPULoadPct          float64 `json:"current_gpu_load_pct,omitempty"`
-	PredictedOptimalGPULoadPct float64 `json:"predicted_optimal_gpu_load_pct,omitempty"`
-	RecoverableGPULoadPct      float64 `json:"recoverable_gpu_load_pct,omitempty"`
-	RecoverableGPUCount        float64 `json:"recoverable_gpu_count,omitempty"`
-	TotalGPUCount              float64 `json:"total_gpu_count,omitempty"`
-	Basis                      string  `json:"basis,omitempty"`
-	Confidence                 float64 `json:"confidence,omitempty"`
+	CurrentGPULoadPct              float64  `json:"current_gpu_load_pct,omitempty"`
+	PredictedOptimalGPULoadPct     float64  `json:"predicted_optimal_gpu_load_pct,omitempty"`
+	RecoverableGPULoadPct          float64  `json:"recoverable_gpu_load_pct,omitempty"`
+	RecoverableGPUCount            float64  `json:"recoverable_gpu_count,omitempty"`
+	TotalGPUCount                  float64  `json:"total_gpu_count,omitempty"`
+	EstimateMode                   string   `json:"estimate_mode,omitempty"`
+	PredictedOptimalGPULoadPctLow  *float64 `json:"predicted_optimal_gpu_load_pct_low,omitempty"`
+	PredictedOptimalGPULoadPctHigh *float64 `json:"predicted_optimal_gpu_load_pct_high,omitempty"`
+	RecoverableGPULoadPctLow       *float64 `json:"recoverable_gpu_load_pct_low,omitempty"`
+	RecoverableGPULoadPctHigh      *float64 `json:"recoverable_gpu_load_pct_high,omitempty"`
+	RecoverableGPUCountLow         *float64 `json:"recoverable_gpu_count_low,omitempty"`
+	RecoverableGPUCountHigh        *float64 `json:"recoverable_gpu_count_high,omitempty"`
+	Basis                          string   `json:"basis,omitempty"`
+	Confidence                     float64  `json:"confidence,omitempty"`
 }
 
 type ParameterChange struct {

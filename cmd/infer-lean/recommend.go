@@ -81,6 +81,7 @@ func runAnalyze(args []string, stdout, stderr io.Writer) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
+	recordCLIEvent("analyze.start", nil)
 	cleanCollectorPath := toAbsIfPresent(strings.TrimSpace(*collectorPath))
 	if cleanCollectorPath == "" {
 		return fmt.Errorf("collector-file is required")
@@ -111,6 +112,7 @@ func runAnalyze(args []string, stdout, stderr io.Writer) error {
 	if err := analyzer.SaveJSON(absOutput, report); err != nil {
 		return err
 	}
+	recordCLIEvent("analyze.complete", nil)
 	if ui.Enabled() {
 		ui.RenderAnalyzeSummaryCard(report)
 	} else {
@@ -138,7 +140,7 @@ func runRecommend(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stderr, "Flags:")
 		fmt.Fprintln(stderr, "  --output <path>         Write the recommendation JSON to this path (default: recommendation-report.json)")
 		fmt.Fprintln(stderr, "  --analysis-file <path>  Analyzer report JSON to consume (default: analysis-report.json)")
-		fmt.Fprintln(stderr, "  --corpus-file <path>    Local benchmark corpus JSON file")
+		fmt.Fprintln(stderr, "  --corpus-file <path>    Optional local benchmark corpus JSON file used for calibration")
 		fmt.Fprintln(stderr, "  --objective <value>     balanced, throughput_first, or latency_first (default: workload profile or balanced)")
 		fmt.Fprintln(stderr, "  --set key=value         Explicit what-if parameter override (repeatable)")
 		fmt.Fprintln(stderr, "  --plain-output          Disable styled terminal output and print only the report path")
@@ -154,6 +156,7 @@ func runRecommend(args []string, stdout, stderr io.Writer) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
+	recordCLIEvent("recommend.start", nil)
 	cleanAnalysisPath := toAbsIfPresent(strings.TrimSpace(*analysisPath))
 	if cleanAnalysisPath == "" {
 		return fmt.Errorf("analysis-file is required")
@@ -180,6 +183,7 @@ func runRecommend(args []string, stdout, stderr io.Writer) error {
 	if err := analyzer.SaveJSON(absOutput, report); err != nil {
 		return err
 	}
+	recordCLIEvent("recommend.complete", nil)
 	if ui.Enabled() {
 		analysisReport, readErr := loadAnalysisReportForUI(cleanAnalysisPath)
 		if readErr == nil {
