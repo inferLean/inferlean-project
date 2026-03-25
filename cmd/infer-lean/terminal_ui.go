@@ -64,11 +64,11 @@ type recommendationSnapshot struct {
 }
 
 func newTerminalUI(out io.Writer, plainOutput bool) terminalUI {
-	enabled := !plainOutput && isTerminalWriter(out)
+	enabled := !plainOutput && terminalWriterChecker(out)
 	return terminalUI{
 		out:     out,
 		enabled: enabled,
-		color:   enabled && terminalSupportsColor(),
+		color:   enabled && terminalColorChecker(),
 	}
 }
 
@@ -224,6 +224,14 @@ func (ui terminalUI) RenderAnalyzeSummaryCard(report *model.AnalysisReport) {
 func (ui terminalUI) RenderRecommendationSummaryCard(report *model.AnalysisReport, recommendation *model.RecommendationReport) {
 	snapshot := buildRecommendationSnapshot(report, recommendation)
 	ui.renderRecommendationSummaryCard(snapshot)
+}
+
+func (ui terminalUI) RenderRunSummaryCards(report *model.AnalysisReport, recommendation *model.RecommendationReport, topRecommendation *topRecommendationAPIResponse) {
+	if !ui.enabled {
+		return
+	}
+	ui.RenderAnalyzeSummaryCard(report)
+	ui.renderRecommendationSummaryCard(buildRunRecommendationSnapshot(report, recommendation, topRecommendation))
 }
 
 func (ui terminalUI) renderAnalysisSummaryCard(snapshot analysisSnapshot) {
@@ -453,6 +461,35 @@ func buildRecommendationSnapshot(report *model.AnalysisReport, recommendation *m
 	}
 	snapshot.Warning = firstNonEmpty(recommendation.Warnings)
 	return snapshot
+}
+
+func buildRunRecommendationSnapshot(report *model.AnalysisReport, recommendation *model.RecommendationReport, topRecommendation *topRecommendationAPIResponse) recommendationSnapshot {
+	snapshot := buildRecommendationSnapshot(report, recommendation)
+	if !recommendationSnapshotEmpty(snapshot) {
+		return snapshot
+	}
+	if topRecommendation == nil {
+		return snapshot
+	}
+	if topRecommendation.CapacityOpportunity != nil {
+		snapshot.WastedCapacityLabel = "GPU Load Headroom"
+		snapshot.WastedCapacity = fmt.Sprintf(
+			"%.1fpp | %s GPU recoverable",
+			topRecommendation.CapacityOpportunity.RecoverableGPULoadPct,
+			formatRecoverableGPUCountCLI(topRecommendation.CapacityOpportunity.RecoverableGPUCount),
+		)
+	}
+	snapshot.BestAction = strings.TrimSpace(topRecommendation.TopRecommendation)
+	return snapshot
+}
+
+func recommendationSnapshotEmpty(snapshot recommendationSnapshot) bool {
+	return strings.TrimSpace(snapshot.TargetGoal) == "" &&
+		strings.TrimSpace(snapshot.WastedCapacityLabel) == "" &&
+		strings.TrimSpace(snapshot.WastedCapacity) == "" &&
+		strings.TrimSpace(snapshot.BestAction) == "" &&
+		strings.TrimSpace(snapshot.ExpectedImpact) == "" &&
+		strings.TrimSpace(snapshot.Warning) == ""
 }
 
 func primaryFinding(report *model.AnalysisReport) (model.Finding, bool) {
@@ -804,6 +841,11 @@ func terminalSupportsColor() bool {
 	}
 	return true
 }
+
+var (
+	terminalWriterChecker = isTerminalWriter
+	terminalColorChecker  = terminalSupportsColor
+)
 
 func truncateRunes(text string, width int) string {
 	if width <= 0 {

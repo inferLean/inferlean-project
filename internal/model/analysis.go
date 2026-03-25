@@ -36,6 +36,9 @@ type Finding struct {
 	Rank                    int            `json:"rank,omitempty"`
 	ImportanceScore         float64        `json:"importance_score,omitempty"`
 	HeuristicImprovementPct float64        `json:"heuristic_improvement_pct,omitempty"`
+	PipelineStage           string         `json:"pipeline_stage,omitempty"`
+	TechnicalExplanation    string         `json:"technical_explanation,omitempty"`
+	ImpactExplanation       string         `json:"impact_explanation,omitempty"`
 	Summary                 string         `json:"summary"`
 	Evidence                []EvidenceItem `json:"evidence,omitempty"`
 }

@@ -188,6 +188,8 @@ func buildRuleRecommendation(issue issueCandidate, ctx ruleBuildContext) model.R
 			"Do not treat tuning results as valid until the hardware fault path is resolved.",
 			"Verify the instability signal disappears on the next collection window before retuning.",
 		)
+	case "text_only_workload_on_multimodal_stack":
+		return buildTextOnlyMultimodalRecommendation(issue, ctx)
 	default:
 		return buildOperationalRecommendation(
 			issue,
@@ -371,6 +373,59 @@ func buildPrefixCacheRecommendation(issue issueCandidate, ctx ruleBuildContext) 
 		"Low cache hit rate with caching already enabled usually means the prompt structure or request mix is fragmenting reuse.",
 		"Confirm prefix cache hits increase before attributing any latency change to another tuning action.",
 	)
+}
+
+func buildTextOnlyMultimodalRecommendation(issue issueCandidate, ctx ruleBuildContext) model.RecommendationItem {
+	flat := flattenMap(ctx.derived.CurrentConfig)
+	if raw, ok := lookupAny(flat, "language_model_only"); ok {
+		if enabled, ok := coerceBool(raw); ok && !enabled {
+			change := model.ParameterChange{
+				Name:             "language_model_only",
+				CurrentValue:     raw,
+				RecommendedValue: true,
+			}
+			return bindIssue(issue, model.RecommendationItem{
+				ID:                   "rule_enable_language_model_only",
+				Objective:            string(ctx.objective),
+				ActionKind:           model.RecommendationActionKindParameterChange,
+				RecommendationSource: model.RecommendationSourceRule,
+				Summary:              conciseRuleSummary("Disable multimodal pathways for text-only traffic", []model.ParameterChange{change}),
+				Changes:              []model.ParameterChange{change},
+				PredictedEffect:      applyFallbackEffect(ctx.baseline, 3, -3, -2, -4, 2),
+				Confidence:           clampFloat(0.70+(issue.Finding.Confidence*0.18), 0.70, 0.88),
+				SafetyNotes: []string{
+					"Only enable language_model_only when the deployment will not receive image, video, or audio inputs.",
+				},
+				ValidationChecks: []string{
+					"Confirm multimodal cache queries remain zero and request latency does not regress after disabling multimodal pathways.",
+				},
+				Basis: "Rule-based multimodal simplification from text-only traffic evidence on a multimodal-capable deployment.",
+			})
+		}
+	}
+
+	change := model.ParameterChange{
+		Name:             "limit_mm_per_prompt",
+		CurrentValue:     flat["limit_mm_per_prompt"],
+		RecommendedValue: map[string]int{"image": 0, "video": 0, "audio": 0},
+	}
+	return bindIssue(issue, model.RecommendationItem{
+		ID:                   "rule_limit_mm_per_prompt_to_zero",
+		Objective:            string(ctx.objective),
+		ActionKind:           model.RecommendationActionKindParameterChange,
+		RecommendationSource: model.RecommendationSourceRule,
+		Summary:              conciseRuleSummary("Set multimodal prompt limits to zero for text-only traffic", []model.ParameterChange{change}),
+		Changes:              []model.ParameterChange{change},
+		PredictedEffect:      applyFallbackEffect(ctx.baseline, 2, -2, -2, -3, 1),
+		Confidence:           clampFloat(0.64+(issue.Finding.Confidence*0.18), 0.64, 0.82),
+		SafetyNotes: []string{
+			"Apply zero modality limits only when the deployment is expected to serve text-only requests throughout the rollout window.",
+		},
+		ValidationChecks: []string{
+			"Verify text-only requests succeed normally and multimodal inputs are intentionally rejected or absent after the change.",
+		},
+		Basis: "Rule-based multimodal limit tightening from text-only traffic evidence when language_model_only was not directly available in the config snapshot.",
+	})
 }
 
 func buildPrefillHeavyRecommendation(issue issueCandidate, ctx ruleBuildContext) model.RecommendationItem {

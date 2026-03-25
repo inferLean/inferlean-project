@@ -15,6 +15,7 @@ func allDetectors() []Detector {
 		newCPUOrHostBottleneckDetector(),
 		newGPUMemorySaturationWithoutThroughputDetector(),
 		newGPUHardwareInstabilityDetector(),
+		newTextOnlyWorkloadOnMultimodalStackDetector(),
 	}
 }
 

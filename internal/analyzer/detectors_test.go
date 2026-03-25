@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/inferLean/inferlean-project/internal/model"
@@ -12,8 +13,8 @@ import (
 
 func TestDetectorCatalogContainsExpectedIDs(t *testing.T) {
 	all := allDetectors()
-	if len(all) != 11 {
-		t.Fatalf("expected 11 detectors in catalog, got %d", len(all))
+	if len(all) != 12 {
+		t.Fatalf("expected 12 detectors in catalog, got %d", len(all))
 	}
 
 	var ids []string
@@ -31,6 +32,7 @@ func TestDetectorCatalogContainsExpectedIDs(t *testing.T) {
 		detectorPrefixCacheIneffective,
 		detectorPromptRecomputationThrashing,
 		detectorQueueDominatedTTFT,
+		detectorTextOnlyOnMultimodalStack,
 		detectorThroughputSaturationWithQueuePressure,
 		detectorUnderutilizedGPUOrConservativeBatch,
 	}
@@ -40,8 +42,8 @@ func TestDetectorCatalogContainsExpectedIDs(t *testing.T) {
 	}
 
 	implemented := implementedDetectors()
-	if len(implemented) != 11 {
-		t.Fatalf("expected 11 implemented detectors, got %d", len(implemented))
+	if len(implemented) != 12 {
+		t.Fatalf("expected 12 implemented detectors, got %d", len(implemented))
 	}
 	for _, detector := range implemented {
 		if !detector.Spec().Implemented {
@@ -84,8 +86,8 @@ func TestIdleFixtureProducesNoActionableRecommendations(t *testing.T) {
 	if summary.DataQuality.TrafficObserved {
 		t.Fatalf("expected idle fixture to have no observed traffic")
 	}
-	if len(summary.Findings) != 11 {
-		t.Fatalf("expected 11 implemented findings, got %d", len(summary.Findings))
+	if len(summary.Findings) != 12 {
+		t.Fatalf("expected 12 implemented findings, got %d", len(summary.Findings))
 	}
 	for _, finding := range summary.Findings {
 		if finding.Status == model.FindingStatusPresent {
@@ -149,8 +151,86 @@ func TestAnalysisReportSerializationIncludesSummary(t *testing.T) {
 	if decoded.AnalysisSummary == nil {
 		t.Fatalf("expected analysis summary after roundtrip")
 	}
-	if len(decoded.AnalysisSummary.Findings) != 11 {
+	if len(decoded.AnalysisSummary.Findings) != 12 {
 		t.Fatalf("expected findings after roundtrip, got %+v", decoded.AnalysisSummary)
+	}
+}
+
+func TestFindingsIncludeStructuredNarratives(t *testing.T) {
+	report := loadFixtureReport(t, "queue_dominated_ttft_report.json")
+
+	summary := SummarizeReport(report, LatencyFirstIntent)
+	finding := mustFindByID(t, summary.Findings, detectorQueueDominatedTTFT)
+	if finding.PipelineStage == "" {
+		t.Fatalf("expected pipeline stage on finding, got %+v", finding)
+	}
+	if strings.TrimSpace(finding.TechnicalExplanation) == "" || strings.TrimSpace(finding.ImpactExplanation) == "" {
+		t.Fatalf("expected technical and impact explanation on finding, got %+v", finding)
+	}
+}
+
+func TestTextOnlyWorkloadOnMultimodalStackDetector(t *testing.T) {
+	report := syntheticReport(28, map[string]float64{
+		"gpu_utilization_pct":                    34,
+		"vllm:num_requests_running":              2,
+		"vllm:request_success_total":             120,
+		"vllm:prompt_tokens_total":               18000,
+		"vllm:generation_tokens_total":           9000,
+		"vllm:mm_cache_queries_total":            0,
+		"vllm:mm_cache_hits_total":               0,
+		"vllm:time_to_first_token_seconds_sum":   30,
+		"vllm:time_to_first_token_seconds_count": 120,
+	}, map[string]float64{
+		"gpu_utilization_pct":                    36,
+		"vllm:num_requests_running":              2,
+		"vllm:request_success_total":             160,
+		"vllm:prompt_tokens_total":               24000,
+		"vllm:generation_tokens_total":           12000,
+		"vllm:mm_cache_queries_total":            0,
+		"vllm:mm_cache_hits_total":               0,
+		"vllm:time_to_first_token_seconds_sum":   40,
+		"vllm:time_to_first_token_seconds_count": 160,
+	})
+	report.CurrentVLLMConfigurations = map[string]any{
+		"model_name":                    "Qwen2.5-VL-7B-Instruct",
+		"language_model_only":           false,
+		"disable_mm_preprocessor_cache": false,
+	}
+
+	summary := SummarizeReport(report, BalancedIntent)
+	finding := mustFindByID(t, summary.Findings, detectorTextOnlyOnMultimodalStack)
+	if finding.Status != model.FindingStatusPresent {
+		t.Fatalf("expected text-only multimodal finding to be present, got %+v", finding)
+	}
+}
+
+func TestTextOnlyWorkloadOnMultimodalStackDetectorStaysAbsentWhenMMTrafficExists(t *testing.T) {
+	report := syntheticReport(28, map[string]float64{
+		"gpu_utilization_pct":          34,
+		"vllm:num_requests_running":    2,
+		"vllm:request_success_total":   120,
+		"vllm:prompt_tokens_total":     18000,
+		"vllm:generation_tokens_total": 9000,
+		"vllm:mm_cache_queries_total":  20,
+		"vllm:mm_cache_hits_total":     10,
+	}, map[string]float64{
+		"gpu_utilization_pct":          36,
+		"vllm:num_requests_running":    2,
+		"vllm:request_success_total":   160,
+		"vllm:prompt_tokens_total":     24000,
+		"vllm:generation_tokens_total": 12000,
+		"vllm:mm_cache_queries_total":  40,
+		"vllm:mm_cache_hits_total":     26,
+	})
+	report.CurrentVLLMConfigurations = map[string]any{
+		"model_name":          "Qwen2.5-VL-7B-Instruct",
+		"language_model_only": false,
+	}
+
+	summary := SummarizeReport(report, BalancedIntent)
+	finding := mustFindByID(t, summary.Findings, detectorTextOnlyOnMultimodalStack)
+	if finding.Status == model.FindingStatusPresent {
+		t.Fatalf("expected multimodal activity to suppress text-only finding, got %+v", finding)
 	}
 }
 

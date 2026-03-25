@@ -104,6 +104,26 @@ func TestBuildRecommendationSnapshotSuppressesLowConfidenceAction(t *testing.T) 
 	}
 }
 
+func TestBuildRunRecommendationSnapshotFallsBackToTopRecommendation(t *testing.T) {
+	snapshot := buildRunRecommendationSnapshot(nil, nil, &topRecommendationAPIResponse{
+		TopRecommendation: "Apply sample-backed queue tuning.",
+		CapacityOpportunity: &model.CapacityOpportunity{
+			RecoverableGPULoadPct: 18,
+			RecoverableGPUCount:   0.7,
+		},
+	})
+
+	if snapshot.WastedCapacityLabel != "GPU Load Headroom" {
+		t.Fatalf("expected gpu headroom fallback label, got %q", snapshot.WastedCapacityLabel)
+	}
+	if snapshot.WastedCapacity != "18.0pp | 0.7 GPU recoverable" {
+		t.Fatalf("expected gpu headroom fallback value, got %q", snapshot.WastedCapacity)
+	}
+	if snapshot.BestAction != "Apply sample-backed queue tuning." {
+		t.Fatalf("expected top recommendation fallback action, got %q", snapshot.BestAction)
+	}
+}
+
 func TestRenderRecommendationSummaryCardDoesNotTruncateActionRows(t *testing.T) {
 	recommendation := recommendationSnapshot{
 		TargetGoal:     "Latency-priority | keep throughput >= 80% of current",

@@ -244,7 +244,9 @@ func parseYAMLScalar(value string) any {
 		return i
 	}
 	if f, err := strconv.ParseFloat(value, 64); err == nil {
-		return f
+		if finite, ok := finiteFloat(f); ok {
+			return finite
+		}
 	}
 	return value
 }
@@ -339,9 +341,9 @@ func coerceInt(v any) (int, bool) {
 func coerceFloat(v any) (float64, bool) {
 	switch typed := v.(type) {
 	case float64:
-		return typed, true
+		return finiteFloat(typed)
 	case float32:
-		return float64(typed), true
+		return finiteFloat(float64(typed))
 	case int:
 		return float64(typed), true
 	case int32:
@@ -350,16 +352,26 @@ func coerceFloat(v any) (float64, bool) {
 		return float64(typed), true
 	case json.Number:
 		f, err := typed.Float64()
-		return f, err == nil
+		if err != nil {
+			return 0, false
+		}
+		return finiteFloat(f)
 	case string:
 		if typed == "" {
 			return 0, false
 		}
 		if f, err := strconv.ParseFloat(strings.TrimSpace(typed), 64); err == nil {
-			return f, true
+			return finiteFloat(f)
 		}
 	}
 	return 0, false
+}
+
+func finiteFloat(v float64) (float64, bool) {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, false
+	}
+	return v, true
 }
 
 func coerceBool(v any) (bool, bool) {

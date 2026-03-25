@@ -568,6 +568,9 @@ func TestRecommendWritesAbsoluteReport(t *testing.T) {
 	if report.ScenarioPrediction == nil {
 		t.Fatalf("expected scenario prediction in recommendation output")
 	}
+	if len(report.ScenarioOptions) < 4 {
+		t.Fatalf("expected scenario options in recommendation output, got %+v", report.ScenarioOptions)
+	}
 	if report.CapacityOpportunity == nil {
 		t.Fatalf("expected capacity opportunity in recommendation output")
 	}
@@ -655,6 +658,27 @@ func TestRunCollectsTriggersAndOpensDashboard(t *testing.T) {
 					"recoverable_gpu_count": 0.7
 				}
 			}`))
+		case "/api/v1/jobs/123/recommendation":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"schema_version":"recommendation/v3",
+				"strategy_options":[
+					{
+						"id":"throughput_push",
+						"label":"Throughput Push",
+						"objective":"throughput_first",
+						"recommended":true,
+						"summary":"Increase max_num_seqs to reduce queueing."
+					},
+					{
+						"id":"latency_guardrail",
+						"label":"Latency Guardrail",
+						"objective":"latency_first",
+						"recommended":false,
+						"summary":"Reduce chunked prefill budget to protect TTFT."
+					}
+				]
+			}`))
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -711,6 +735,9 @@ func TestRunCollectsTriggersAndOpensDashboard(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Top recommendation: Increase max_num_seqs to reduce queueing.") {
 		t.Fatalf("expected stdout to include top recommendation summary, got %q", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "Alternative path: Reduce chunked prefill budget to protect TTFT.") {
+		t.Fatalf("expected stdout to include alternative path summary, got %q", stdout.String())
+	}
 	if !strings.Contains(stdout.String(), "Current saturation: 84.0%") {
 		t.Fatalf("expected stdout to include current saturation, got %q", stdout.String())
 	}
@@ -748,6 +775,8 @@ func TestRunContinuesAfterInterruptDuringCollection(t *testing.T) {
 		case "/api/v1/jobs/123/top-recommendation":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"job_id":"123","id":"123","top_recommendation":"Use partial sample tuning."}`))
+		case "/api/v1/jobs/123/recommendation":
+			w.WriteHeader(http.StatusNotFound)
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -847,6 +876,146 @@ func TestRunContinuesAfterInterruptDuringCollection(t *testing.T) {
 	}
 	if !openCalled {
 		t.Fatalf("expected browser open to be attempted")
+	}
+}
+
+func TestRunRendersPremiumCardsWhenTerminalUIEnabled(t *testing.T) {
+	tmp := t.TempDir()
+	metricsPath := filepath.Join(tmp, "metrics.json")
+	configPath := filepath.Join(tmp, "config.json")
+	mustWriteFile(t, metricsPath, `{
+  "collected_metrics": [
+    {"time_label": "2026-03-20T10:00:00Z", "metrics": {"request_tps": 6, "latency_ms": 420}},
+    {"time_label": "2026-03-20T10:01:00Z", "metrics": {"request_tps": 7, "latency_ms": 390}}
+  ]
+}`)
+	mustWriteFile(t, configPath, `{"max_num_seqs": 8, "max_num_batched_tokens": 8192}`)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/trigger-job":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"job_id":"123","status":"queued"}`))
+		case "/api/v1/jobs/123/analysis":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+  "schema_version":"v3",
+  "service_summary":{
+    "request_rate_rps":7.5,
+    "request_latency_ms":{"avg":850,"p50":700,"p99":1200,"percentiles_available":true},
+    "queue":{"avg_delay_ms":420,"avg_waiting_requests":3.1,"health":"elevated"},
+    "saturation_pct":84,
+    "estimated_upper_request_rate_rps":8.93,
+    "bottleneck":{"kind":"gpu_compute","confidence":0.91},
+    "observed_mode":{"objective":"balanced","serving_pattern":"realtime","confidence":0.82},
+    "configured_intent":{"value":"latency_first","confidence":0.92}
+  },
+  "current_load_summary":{
+    "current_saturation_pct":84,
+    "current_gpu_load_pct":72,
+    "current_gpu_load_effective_count":2.9,
+    "total_gpu_count":4,
+    "current_load_bottleneck":"gpu_compute_bound",
+    "dominant_gpu_resource":"compute",
+    "compute_load_pct":84,
+    "memory_bandwidth_load_pct":55,
+    "cpu_load_pct":70
+  },
+  "diagnosis_summary":{
+    "findings":[
+      {"id":"queue_dominated_ttft","summary":"Queue-heavy TTFT hurts responsiveness","status":"present","rank":1}
+    ]
+  }
+}`))
+		case "/api/v1/jobs/123/top-recommendation":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+  "job_id":"123",
+  "id":"123",
+  "top_issue":"Queue-heavy TTFT hurts responsiveness",
+  "top_recommendation":"Increase max_num_seqs to reduce queueing.",
+  "gpu_capacity_headroom":{"recoverable_gpu_load_pct":18,"recoverable_gpu_count":0.7}
+}`))
+		case "/api/v1/jobs/123/recommendation":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+  "schema_version":"recommendation/v1",
+  "declared_intent":{"value":"latency_first","source":"intent_file"},
+  "guardrail_policy":{"min_throughput_retention_pct":80},
+  "gpu_capacity_headroom":{"recoverable_gpu_load_pct":18,"recoverable_gpu_count":0.7},
+  "recommended_action":{"summary":"Apply benchmark-backed tuning: max_num_batched_tokens=4096, max_num_seqs=256","confidence":0.92},
+  "expected_impact":{
+    "request_rate_rps":{"after":12.77,"delta_pct":204.1},
+    "request_latency_ms":{"p50":{"after":1520,"delta_pct":-15.6}},
+    "gpu_utilization_pct":{"after":44,"delta_pct":83.3}
+  },
+  "strategy_options":[
+    {"id":"primary","recommended":true,"summary":"Increase max_num_seqs to reduce queueing."}
+  ]
+}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	t.Setenv(inferleanBaseURLEnv, server.URL)
+
+	previousOpen := openDashboardInBrowser
+	openDashboardInBrowser = func(target string) error {
+		_ = target
+		return nil
+	}
+	defer func() { openDashboardInBrowser = previousOpen }()
+
+	previousPollInterval := runPollInterval
+	previousPollTimeout := runPollTimeout
+	runPollInterval = 5 * time.Millisecond
+	runPollTimeout = 2 * time.Second
+	defer func() {
+		runPollInterval = previousPollInterval
+		runPollTimeout = previousPollTimeout
+	}()
+
+	previousTerminalWriterChecker := terminalWriterChecker
+	previousTerminalColorChecker := terminalColorChecker
+	terminalWriterChecker = func(w io.Writer) bool {
+		_ = w
+		return true
+	}
+	terminalColorChecker = func() bool { return false }
+	defer func() {
+		terminalWriterChecker = previousTerminalWriterChecker
+		terminalColorChecker = previousTerminalColorChecker
+	}()
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	exitCode := Execute([]string{
+		"run",
+		"--metrics-file", metricsPath,
+		"--config-file", configPath,
+		"--vllm-version", "0.17.1",
+		"--deployment-type", "docker",
+	}, stdout, stderr)
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr=%s", exitCode, stderr.String())
+	}
+
+	rendered := stdout.String()
+	for _, want := range []string{
+		"Saturation",
+		"Observed Traffic",
+		"GPU compute 84%, GPU bandwidth 55%, CPU 70%",
+		"GPU Load Headroom",
+		"Target Goal",
+		"Best Action",
+		"Expected Impact",
+		"Increase max_num_seqs to reduce queueing.",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("expected premium run output to include %q, got %q", want, rendered)
+		}
 	}
 }
 
@@ -997,6 +1166,8 @@ func TestWaitForJobCompletionReportsStagedProgress(t *testing.T) {
 				return
 			}
 			_, _ = w.Write([]byte(`{"job_id":"123","id":"123","top_recommendation":"Tune max_num_seqs."}`))
+		case "/api/v1/jobs/123/recommendation":
+			w.WriteHeader(http.StatusNotFound)
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -1013,7 +1184,7 @@ func TestWaitForJobCompletionReportsStagedProgress(t *testing.T) {
 	}()
 
 	updates := make([]waitProgressUpdate, 0, 6)
-	analysis, recommendation, err := waitForJobCompletion(server.URL, "123", "", func(update waitProgressUpdate) {
+	analysis, _, recommendation, err := waitForJobCompletion(server.URL, "123", "", func(update waitProgressUpdate) {
 		updates = append(updates, update)
 	})
 	if err != nil {

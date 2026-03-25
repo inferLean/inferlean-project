@@ -11,7 +11,7 @@ func evidence(metric string, value float64, note string) model.EvidenceItem {
 }
 
 func insufficientFinding(spec DetectorSpec, summary string, confidence float64, evidenceItems ...model.EvidenceItem) model.Finding {
-	return model.Finding{
+	return enrichFindingNarrative(model.Finding{
 		ID:         spec.ID,
 		Category:   spec.Category,
 		Status:     model.FindingStatusInsufficientData,
@@ -19,11 +19,11 @@ func insufficientFinding(spec DetectorSpec, summary string, confidence float64, 
 		Confidence: clampFloat(confidence, 0, 1),
 		Summary:    summary,
 		Evidence:   evidenceItems,
-	}
+	})
 }
 
 func absentFinding(spec DetectorSpec, summary string, confidence float64, evidenceItems ...model.EvidenceItem) model.Finding {
-	return model.Finding{
+	return enrichFindingNarrative(model.Finding{
 		ID:         spec.ID,
 		Category:   spec.Category,
 		Status:     model.FindingStatusAbsent,
@@ -31,11 +31,11 @@ func absentFinding(spec DetectorSpec, summary string, confidence float64, eviden
 		Confidence: clampFloat(confidence, 0, 1),
 		Summary:    summary,
 		Evidence:   evidenceItems,
-	}
+	})
 }
 
 func presentFinding(spec DetectorSpec, severity, summary string, confidence float64, evidenceItems ...model.EvidenceItem) model.Finding {
-	return model.Finding{
+	return enrichFindingNarrative(model.Finding{
 		ID:         spec.ID,
 		Category:   spec.Category,
 		Status:     model.FindingStatusPresent,
@@ -43,5 +43,5 @@ func presentFinding(spec DetectorSpec, severity, summary string, confidence floa
 		Confidence: clampFloat(confidence, 0, 1),
 		Summary:    summary,
 		Evidence:   evidenceItems,
-	}
+	})
 }

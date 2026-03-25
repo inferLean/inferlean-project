@@ -222,7 +222,7 @@ func runEndToEnd(args []string, stdout, stderr io.Writer) error {
 	var analysisProgress *terminalProgressBar
 	var recommendationProgress *terminalProgressBar
 	recordCLIEvent("run.wait.start", nil)
-	analysisReport, topRecommendation, err := waitForJobCompletion(baseURL, triggerResponse.ID, authToken, func(update waitProgressUpdate) {
+	analysisReport, recommendationReport, topRecommendation, err := waitForJobCompletion(baseURL, triggerResponse.ID, authToken, func(update waitProgressUpdate) {
 		if !ui.Enabled() {
 			return
 		}
@@ -262,17 +262,26 @@ func runEndToEnd(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("wait for job completion: %w", err)
 	}
 	recordCLIEvent("run.wait.complete", nil)
+	if ui.Enabled() {
+		ui.RenderRunSummaryCards(analysisReport, recommendationReport, topRecommendation)
+		recordCLIEvent("run.output.premium_cards", map[string]string{
+			"recommendation_report_available": fmt.Sprintf("%t", recommendationReport != nil),
+		})
+	}
 
 	topIssue := topIssueSummary(analysisReport)
 	if summary := strings.TrimSpace(topRecommendation.TopIssue); summary != "" {
 		topIssue = summary
 	}
-	topRecommendationSummaryLine := topRecommendationSummary(nil)
+	topRecommendationSummaryLine := topRecommendationSummary(recommendationReport)
 	if summary := strings.TrimSpace(topRecommendation.TopRecommendation); summary != "" {
 		topRecommendationSummaryLine = summary
 	}
 	fmt.Fprintf(stdout, "Top issue: %s\n", topIssue)
 	fmt.Fprintf(stdout, "Top recommendation: %s\n", topRecommendationSummaryLine)
+	if alternativeSummary := alternativeStrategySummary(recommendationReport); alternativeSummary != "" {
+		fmt.Fprintf(stdout, "Alternative path: %s\n", alternativeSummary)
+	}
 	for _, line := range currentLoadSummaryLines(analysisReport, topRecommendation.CapacityOpportunity) {
 		fmt.Fprintln(stdout, line)
 	}
@@ -400,17 +409,18 @@ func triggerJob(baseURL string, collectorPayload []byte, authToken string) (*tri
 	return &out, nil
 }
 
-func waitForJobCompletion(baseURL, jobID, authToken string, progressCallback func(waitProgressUpdate)) (*model.AnalysisReport, *topRecommendationAPIResponse, error) {
+func waitForJobCompletion(baseURL, jobID, authToken string, progressCallback func(waitProgressUpdate)) (*model.AnalysisReport, *model.RecommendationReport, *topRecommendationAPIResponse, error) {
 	jobID = strings.TrimSpace(jobID)
 	if jobID == "" {
-		return nil, nil, errors.New("job id is required")
+		return nil, nil, nil, errors.New("job id is required")
 	}
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if baseURL == "" {
-		return nil, nil, errors.New("base url is required")
+		return nil, nil, nil, errors.New("base url is required")
 	}
 	deadline := time.Now().Add(runPollTimeout)
 	analysisURL := fmt.Sprintf("%s/api/v1/jobs/%s/analysis", baseURL, url.PathEscape(jobID))
+	recommendationURL := fmt.Sprintf("%s/api/v1/jobs/%s/recommendation", baseURL, url.PathEscape(jobID))
 	topRecommendationURL := fmt.Sprintf("%s/api/v1/jobs/%s/top-recommendation", baseURL, url.PathEscape(jobID))
 	var analysis model.AnalysisReport
 	if err := waitForArtifact(
@@ -433,9 +443,9 @@ func waitForJobCompletion(baseURL, jobID, authToken string, progressCallback fun
 		},
 	); err != nil {
 		if errors.Is(err, errArtifactWaitTimeout) {
-			return nil, nil, fmt.Errorf("timed out waiting for analysis/recommendation for job %s", jobID)
+			return nil, nil, nil, fmt.Errorf("timed out waiting for analysis/recommendation for job %s", jobID)
 		}
-		return nil, nil, fmt.Errorf("fetch analysis: %w", err)
+		return nil, nil, nil, fmt.Errorf("fetch analysis: %w", err)
 	}
 
 	var recommendation topRecommendationAPIResponse
@@ -459,12 +469,13 @@ func waitForJobCompletion(baseURL, jobID, authToken string, progressCallback fun
 		},
 	); err != nil {
 		if errors.Is(err, errArtifactWaitTimeout) {
-			return nil, nil, fmt.Errorf("timed out waiting for analysis/recommendation for job %s", jobID)
+			return nil, nil, nil, fmt.Errorf("timed out waiting for analysis/recommendation for job %s", jobID)
 		}
-		return nil, nil, fmt.Errorf("fetch recommendation: %w", err)
+		return nil, nil, nil, fmt.Errorf("fetch recommendation: %w", err)
 	}
 
-	return &analysis, &recommendation, nil
+	fullRecommendation, _ := fetchOptionalRecommendationReport(recommendationURL, authToken)
+	return &analysis, fullRecommendation, &recommendation, nil
 }
 
 func waitForArtifact(endpoint, authToken string, deadline time.Time, expectedDuration time.Duration, out any, onProgress func(progress float64, elapsed, eta time.Duration, done bool)) error {
@@ -554,6 +565,37 @@ func fetchPendingJSONArtifact(endpoint, authToken string, out any) (bool, error)
 	return false, nil
 }
 
+func fetchOptionalRecommendationReport(endpoint, authToken string) (*model.RecommendationReport, error) {
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	if authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+authToken)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusAccepted || resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
+		return nil, nil
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, nil
+	}
+
+	var report model.RecommendationReport
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&report); err != nil {
+		return nil, err
+	}
+	return &report, nil
+}
+
 func topIssueSummary(report *model.AnalysisReport) string {
 	primary, ok := primaryFinding(report)
 	if !ok {
@@ -563,6 +605,13 @@ func topIssueSummary(report *model.AnalysisReport) string {
 }
 
 func topRecommendationSummary(report *model.RecommendationReport) string {
+	if report != nil {
+		for _, strategy := range report.StrategyOptions {
+			if strategy.Recommended && strings.TrimSpace(strategy.Summary) != "" {
+				return strings.TrimSpace(strategy.Summary)
+			}
+		}
+	}
 	if report == nil || len(report.Recommendations) == 0 {
 		return "No recommendation was produced."
 	}
@@ -572,6 +621,18 @@ func topRecommendationSummary(report *model.RecommendationReport) string {
 		}
 	}
 	return "No recommendation was produced."
+}
+
+func alternativeStrategySummary(report *model.RecommendationReport) string {
+	if report == nil {
+		return ""
+	}
+	for _, strategy := range report.StrategyOptions {
+		if !strategy.Recommended && strings.TrimSpace(strategy.Summary) != "" {
+			return strings.TrimSpace(strategy.Summary)
+		}
+	}
+	return ""
 }
 
 func currentLoadSummaryLines(analysis *model.AnalysisReport, capacity *model.CapacityOpportunity) []string {

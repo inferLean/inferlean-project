@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -136,7 +137,9 @@ func parseRuntimeConfigValue(value string) any {
 		return i
 	}
 	if f, err := strconv.ParseFloat(value, 64); err == nil {
-		return f
+		if !math.IsNaN(f) && !math.IsInf(f, 0) {
+			return f
+		}
 	}
 	return value
 }

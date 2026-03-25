@@ -127,6 +127,7 @@ Current detector catalog and status:
 | `cpu_or_host_bottleneck` | `host` | `implemented` | Host CPU pressure appears to limit throughput or latency before GPU saturation. |
 | `gpu_memory_saturation_without_throughput` | `memory` | `implemented` | GPU memory occupancy is high without corresponding throughput gains. |
 | `gpu_hardware_instability` | `reliability` | `implemented` | XID errors indicate hardware or driver instability. |
+| `text_only_workload_on_multimodal_stack` | `multimodal` | `implemented` | Multimodal-capable serving stack appears to be serving only text traffic, so multimodal pathways may add avoidable overhead. |
 
 Analyzer findings are sorted by heuristic importance. Present findings also include per-finding `heuristic_improvement_pct`, and `analysis_summary.total_heuristic_improvement_pct` gives a capped aggregate estimate across present findings.
 
@@ -166,6 +167,7 @@ The most usual recurring issue families, based on official vLLM docs, are:
 - CPU underprovisioning for tokenization, scheduling, streaming, and multimodal input processing.
 - Missed cache opportunities from ineffective prefix caching or multimodal processor caching.
 - Multimodal-specific CPU exhaustion from media loading threads, processor kwargs, and repeated image/video preprocessing.
+- Unused multimodal pathways left enabled for text-only traffic, which can add avoidable preprocessing and memory overhead.
 - Configuration choices that trade memory for speed but may harm throughput, such as CPU offload or certain quantization modes.
 
 Inference from sources:

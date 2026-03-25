@@ -33,6 +33,12 @@ func ExtractFeatures(report *model.AnalysisReport) FeatureSet {
 	config := flattenMap(report.CurrentVLLMConfigurations)
 	features.ModelName = lookupString(config, "model_name", "model", "served_model_name")
 	features.MultimodalLikely = containsAnyFold(features.ModelName, "vl", "vision", "llava", "pixtral", "internvl")
+	features.MultimodalConfigPresent = hasMultimodalConfig(config)
+	if raw, ok := lookupAny(config, "language_model_only"); ok {
+		if enabled, ok := coerceBool(raw); ok {
+			features.LanguageModelOnlyEnabled = enabled
+		}
+	}
 	if raw, ok := lookupAny(config, "disable_mm_preprocessor_cache"); ok {
 		if disabled, ok := coerceBool(raw); ok {
 			features.MMPreprocessorCacheDisabled = disabled
@@ -294,6 +300,28 @@ func positiveDelta(delta float64) float64 {
 		return 0
 	}
 	return delta
+}
+
+func hasMultimodalConfig(config map[string]any) bool {
+	if len(config) == 0 {
+		return false
+	}
+	for key, value := range config {
+		trimmedKey := strings.TrimSpace(strings.ToLower(key))
+		switch {
+		case strings.HasPrefix(trimmedKey, "mm_"),
+			trimmedKey == "disable_mm_preprocessor_cache",
+			trimmedKey == "limit_mm_per_prompt",
+			trimmedKey == "media_io_kwargs",
+			trimmedKey == "interleave_mm_strings":
+			return true
+		case trimmedKey == "language_model_only":
+			if enabled, ok := coerceBool(value); ok && !enabled {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func featureSummaryFromSet(features FeatureSet) model.FeatureSummary {

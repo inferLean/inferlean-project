@@ -66,6 +66,34 @@ func TestParseRuntimeConfigFromArgs(t *testing.T) {
 	}
 }
 
+func TestParseRuntimeConfigFromArgsKeepsNonFiniteNumbersSerializable(t *testing.T) {
+	args := []string{
+		"vllm", "bench", "serve",
+		"--request-rate", "inf",
+		"--burstiness", "NaN",
+	}
+
+	got := parseRuntimeConfigFromArgs(args)
+	if got["request_rate"] != "inf" {
+		t.Fatalf("expected request_rate to remain string, got %+v", got["request_rate"])
+	}
+	if got["burstiness"] != "NaN" {
+		t.Fatalf("expected burstiness to remain string, got %+v", got["burstiness"])
+	}
+}
+
+func TestPickBestVLLMPIDPrefersServeProcessOverBenchServe(t *testing.T) {
+	candidates := map[int][]string{
+		99483: {"python3", "/workspace/r7/bin/vllm", "bench", "serve", "--request-rate", "inf", "--port", "8889"},
+		99799: {"python3", "/workspace/r7/bin/vllm", "serve", "Qwen/Qwen3.5-0.8B", "--port", "8889"},
+	}
+
+	got := pickBestVLLMPID(candidates)
+	if got != 99799 {
+		t.Fatalf("expected serve pid 99799, got %d", got)
+	}
+}
+
 func TestParseVLLMMetricsTargetFromArgs(t *testing.T) {
 	tests := []struct {
 		name string

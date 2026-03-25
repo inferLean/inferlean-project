@@ -26,6 +26,7 @@ const (
 	detectorCPUOrHostBottleneck                   = "cpu_or_host_bottleneck"
 	detectorGPUMemorySaturation                   = "gpu_memory_saturation_without_throughput"
 	detectorGPUHardwareInstability                = "gpu_hardware_instability"
+	detectorTextOnlyOnMultimodalStack             = "text_only_workload_on_multimodal_stack"
 )
 
 type DetectorSpec struct {
@@ -58,6 +59,8 @@ type FeatureSet struct {
 	Metrics                      map[string]MetricSummary
 	ModelName                    string
 	MultimodalLikely             bool
+	MultimodalConfigPresent      bool
+	LanguageModelOnlyEnabled     bool
 	MMPreprocessorCacheDisabled  bool
 	MMProcessorCacheGB           float64
 	TrafficObserved              bool

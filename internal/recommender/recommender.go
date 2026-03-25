@@ -60,6 +60,7 @@ func (r *Recommender) Recommend(ctx context.Context, opts Options) (*model.Recom
 	report.BaselinePrediction = derived.ObservedBaseline
 	if !derived.TrafficObserved {
 		report.Warnings = append(report.Warnings, "no live traffic was observed; recommendation output is intentionally non-actionable")
+		report.ScenarioOptions = buildScenarioOptions(report, opts.ScenarioSet)
 		if opts.LLMEnhance {
 			if enhanced, warning := llm.EnhanceRecommendationReport(ctx, report); enhanced != nil {
 				report.LLMEnhanced = enhanced
@@ -85,6 +86,7 @@ func (r *Recommender) Recommend(ctx context.Context, opts Options) (*model.Recom
 	report.Recommendations = buildIssueRecommendations(analysis, derived, objective, report.BaselinePrediction)
 	applyCorpusCalibration(report, calibration, derived)
 	assignRecommendationPriorities(report.Recommendations)
+	report.StrategyOptions = buildStrategyOptions(report, analysis, derived, objective, calibration)
 
 	if len(opts.ScenarioSet) > 0 {
 		if calibration != nil {
@@ -100,6 +102,7 @@ func (r *Recommender) Recommend(ctx context.Context, opts Options) (*model.Recom
 
 	report.CapacityOpportunity = buildCapacityOpportunity(analysis, report)
 	populateRecommendationSummary(report, analysis)
+	report.ScenarioOptions = buildScenarioOptions(report, opts.ScenarioSet)
 
 	if opts.LLMEnhance {
 		if enhanced, warning := llm.EnhanceRecommendationReport(ctx, report); enhanced != nil {
@@ -154,16 +157,11 @@ func buildCapacityOpportunity(analysis *model.AnalysisReport, report *model.Reco
 		return nil
 	}
 
-	topRecommendation := firstRecommendation(report)
-	if topRecommendation == nil {
-		return nil
-	}
-
 	currentLoadPct, ok := currentGPULoadPctForOpportunity(analysis, report)
 	if !ok {
 		return nil
 	}
-	predictedLoadPct, basis, confidence, ok := predictedGPULoadPctForOpportunity(currentLoadPct, topRecommendation)
+	predictedLoadPct, basis, confidence, precise, ok := preferredGPULoadOpportunity(report, currentLoadPct)
 	if !ok {
 		return nil
 	}
@@ -178,7 +176,7 @@ func buildCapacityOpportunity(analysis *model.AnalysisReport, report *model.Reco
 	pointPredictedLoadPct := predictedLoadPct
 	lowRecoverablePct := recoverableLoadPct
 	highRecoverablePct := recoverableLoadPct
-	if usesPreciseBenchmarkHeadroom(report, topRecommendation) {
+	if precise {
 		estimateMode = "benchmark_calibrated"
 		spread := clampFloat(recoverableLoadPct*(1-clampFloat(confidence, 0, 1))*0.30, 0.5, math.Max(recoverableLoadPct*0.15, 0.5))
 		lowRecoverablePct = clampFloat(recoverableLoadPct-spread, 0, recoverableLoadPct)
@@ -243,34 +241,145 @@ func buildMatchSummary(report *model.RecommendationReport) *model.MatchSummary {
 }
 
 func buildPrimaryAction(report *model.RecommendationReport) *model.PrimaryActionSummary {
-	if report == nil || len(report.Recommendations) == 0 {
+	if report == nil {
+		return nil
+	}
+	if strategy := recommendedStrategy(report); strategy != nil {
+		return strategyToPrimaryActionSummary(*strategy)
+	}
+	if len(report.Recommendations) == 0 {
 		return nil
 	}
 	item := report.Recommendations[0]
-	return &model.PrimaryActionSummary{
-		Summary:        strings.TrimSpace(item.Summary),
-		Changes:        append([]model.ParameterChange(nil), item.Changes...),
-		RollbackValues: rollbackChanges(item.Changes),
-		Confidence:     clampFloat(item.Confidence, 0, 1),
-		Basis:          strings.TrimSpace(item.Basis),
-	}
+	return recommendationItemToPrimaryActionSummary(item)
 }
 
 func buildAlternativeActions(report *model.RecommendationReport) []model.PrimaryActionSummary {
-	if report == nil || len(report.Recommendations) <= 1 {
+	if report == nil {
 		return nil
 	}
-	alternatives := make([]model.PrimaryActionSummary, 0, len(report.Recommendations)-1)
-	for _, item := range report.Recommendations[1:] {
-		alternatives = append(alternatives, model.PrimaryActionSummary{
-			Summary:        strings.TrimSpace(item.Summary),
-			Changes:        append([]model.ParameterChange(nil), item.Changes...),
-			RollbackValues: rollbackChanges(item.Changes),
-			Confidence:     clampFloat(item.Confidence, 0, 1),
-			Basis:          strings.TrimSpace(item.Basis),
-		})
+	alternatives := []model.PrimaryActionSummary{}
+	for _, strategy := range report.StrategyOptions {
+		if strategy.Recommended {
+			continue
+		}
+		if summary := strategyToPrimaryActionSummary(strategy); summary != nil {
+			alternatives = append(alternatives, *summary)
+		}
+	}
+	start := 1
+	if len(report.StrategyOptions) > 0 {
+		start = 0
+	}
+	for _, item := range report.Recommendations[start:] {
+		if summary := recommendationItemToPrimaryActionSummary(item); summary != nil {
+			alternatives = append(alternatives, *summary)
+		}
+	}
+	if len(alternatives) == 0 {
+		return nil
 	}
 	return alternatives
+}
+
+func buildScenarioOptions(report *model.RecommendationReport, scenarioSet map[string]float64) []model.ScenarioOption {
+	if report == nil {
+		return nil
+	}
+
+	options := []model.ScenarioOption{}
+	if report.BaselinePrediction != nil {
+		options = append(options, model.ScenarioOption{
+			ID:         "current_baseline",
+			Kind:       "baseline",
+			Label:      "Current Baseline",
+			Objective:  report.Objective,
+			Summary:    "Observed current live-traffic baseline for the present configuration.",
+			Prediction: clonePrediction(report.BaselinePrediction),
+			Basis:      strings.TrimSpace(report.BaselinePrediction.Basis),
+			Confidence: clampFloat(report.BaselinePrediction.Confidence, 0, 1),
+		})
+	}
+	for _, strategy := range report.StrategyOptions {
+		options = append(options, model.ScenarioOption{
+			ID:          "strategy_" + strings.TrimSpace(strategy.ID),
+			Kind:        "strategy_path",
+			Label:       strings.TrimSpace(strategy.Label),
+			Objective:   strings.TrimSpace(strategy.Objective),
+			Recommended: strategy.Recommended,
+			Summary:     strings.TrimSpace(strategy.Summary),
+			Changes:     append([]model.ParameterChange(nil), strategy.Changes...),
+			Prediction:  predictionFromScenarioEffect(strategy.PredictedEffect),
+			Tradeoff:    strings.TrimSpace(strategy.Tradeoff),
+			Basis:       strings.TrimSpace(strategy.Basis),
+			Confidence:  clampFloat(strategy.Confidence, 0, 1),
+		})
+	}
+	if report.ScenarioPrediction != nil && len(scenarioSet) > 0 {
+		options = append(options, model.ScenarioOption{
+			ID:         "custom_what_if",
+			Kind:       "custom_what_if",
+			Label:      "Custom What-If",
+			Objective:  report.Objective,
+			Summary:    "Predicted outcome for the explicit scenario override set.",
+			Changes:    scenarioSetToChanges(scenarioSet),
+			Prediction: clonePrediction(report.ScenarioPrediction),
+			Basis:      strings.TrimSpace(report.ScenarioPrediction.Basis),
+			Confidence: clampFloat(report.ScenarioPrediction.Confidence, 0, 1),
+		})
+	}
+	if len(options) == 0 {
+		return nil
+	}
+	return options
+}
+
+func clonePrediction(prediction *model.Prediction) *model.Prediction {
+	if prediction == nil {
+		return nil
+	}
+	cloned := *prediction
+	return &cloned
+}
+
+func predictionFromScenarioEffect(effect model.PredictedEffect) *model.Prediction {
+	hasAbsoluteMetric := effect.ThroughputTokensPerSecond > 0 ||
+		effect.TTFTMs > 0 ||
+		effect.LatencyP50Ms > 0 ||
+		effect.LatencyP95Ms > 0 ||
+		effect.GPUUtilizationPct > 0
+	if !hasAbsoluteMetric {
+		return nil
+	}
+	return &model.Prediction{
+		ThroughputTokensPerSecond: effect.ThroughputTokensPerSecond,
+		TTFTMs:                    effect.TTFTMs,
+		LatencyP50Ms:              effect.LatencyP50Ms,
+		LatencyP95Ms:              effect.LatencyP95Ms,
+		GPUUtilizationPct:         effect.GPUUtilizationPct,
+	}
+}
+
+func scenarioSetToChanges(scenarioSet map[string]float64) []model.ParameterChange {
+	if len(scenarioSet) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(scenarioSet))
+	for key := range scenarioSet {
+		trimmed := strings.TrimSpace(key)
+		if trimmed != "" {
+			keys = append(keys, trimmed)
+		}
+	}
+	sort.Strings(keys)
+	changes := make([]model.ParameterChange, 0, len(keys))
+	for _, key := range keys {
+		changes = append(changes, model.ParameterChange{
+			Name:             key,
+			RecommendedValue: scenarioSet[key],
+		})
+	}
+	return changes
 }
 
 func rollbackChanges(changes []model.ParameterChange) []model.ParameterChange {
@@ -289,10 +398,15 @@ func rollbackChanges(changes []model.ParameterChange) []model.ParameterChange {
 }
 
 func buildValidationSummary(primary *model.PrimaryActionSummary, report *model.RecommendationReport) *model.ValidationSummary {
-	if report == nil || len(report.Recommendations) == 0 {
+	if report == nil {
 		return nil
 	}
-	checks := append([]string(nil), report.Recommendations[0].ValidationChecks...)
+	checks := []string{}
+	if strategy := recommendedStrategy(report); strategy != nil {
+		checks = append(checks, strategy.ValidationChecks...)
+	} else if len(report.Recommendations) > 0 {
+		checks = append(checks, report.Recommendations[0].ValidationChecks...)
+	}
 	if len(checks) == 0 && primary == nil {
 		return nil
 	}
@@ -304,13 +418,22 @@ func buildPredictedImpact(report *model.RecommendationReport) *model.PredictedIm
 		return nil
 	}
 	top := firstRecommendation(report)
-	if top == nil && report.ScenarioPrediction == nil {
+	strategy := recommendedStrategy(report)
+	if top == nil && strategy == nil && report.ScenarioPrediction == nil {
 		return nil
 	}
 
 	current := report.CurrentServiceState
 	prediction := report.ScenarioPrediction
-	if top != nil {
+	if strategy != nil {
+		prediction = &model.Prediction{
+			ThroughputTokensPerSecond: strategy.PredictedEffect.ThroughputTokensPerSecond,
+			TTFTMs:                    strategy.PredictedEffect.TTFTMs,
+			LatencyP50Ms:              strategy.PredictedEffect.LatencyP50Ms,
+			LatencyP95Ms:              strategy.PredictedEffect.LatencyP95Ms,
+			GPUUtilizationPct:         strategy.PredictedEffect.GPUUtilizationPct,
+		}
+	} else if top != nil {
 		prediction = &model.Prediction{
 			ThroughputTokensPerSecond: top.PredictedEffect.ThroughputTokensPerSecond,
 			TTFTMs:                    top.PredictedEffect.TTFTMs,
@@ -321,12 +444,12 @@ func buildPredictedImpact(report *model.RecommendationReport) *model.PredictedIm
 	}
 
 	summary := &model.PredictedImpactSummary{}
-	if after, delta := deriveRequestRateImpact(current, top); after != nil || delta != nil {
+	if after, delta := derivePreferredRequestRateImpact(current, report); after != nil || delta != nil {
 		summary.RequestRateRPS = model.NumericImpact{After: after, DeltaPct: delta}
 	}
 	if current != nil {
-		if top != nil && top.PredictedEffect.LatencyP50Ms > 0 {
-			after := top.PredictedEffect.LatencyP50Ms
+		if prediction != nil && prediction.LatencyP50Ms > 0 {
+			after := prediction.LatencyP50Ms
 			summary.RequestLatencyMS.P50 = model.NumericImpact{After: &after, DeltaPct: deltaFromCurrent(current.RequestLatencyMS.P50, after)}
 		}
 	}
@@ -353,7 +476,7 @@ func buildWastedCapacity(report *model.RecommendationReport) *model.WastedCapaci
 	if report == nil {
 		return nil
 	}
-	afterRPS, deltaPct := deriveRequestRateImpact(report.CurrentServiceState, firstRecommendation(report))
+	afterRPS, deltaPct := derivePreferredRequestRateImpact(report.CurrentServiceState, report)
 	var gpuHeadroomPct *float64
 	var gpuHeadroomCount *float64
 	basis := ""
@@ -396,6 +519,26 @@ func buildWastedCapacity(report *model.RecommendationReport) *model.WastedCapaci
 	return nil
 }
 
+func recommendationItemToPrimaryActionSummary(item model.RecommendationItem) *model.PrimaryActionSummary {
+	return &model.PrimaryActionSummary{
+		Summary:        strings.TrimSpace(item.Summary),
+		Changes:        append([]model.ParameterChange(nil), item.Changes...),
+		RollbackValues: rollbackChanges(item.Changes),
+		Confidence:     clampFloat(item.Confidence, 0, 1),
+		Basis:          strings.TrimSpace(item.Basis),
+	}
+}
+
+func strategyToPrimaryActionSummary(strategy model.RecommendationStrategy) *model.PrimaryActionSummary {
+	return &model.PrimaryActionSummary{
+		Summary:        strings.TrimSpace(strategy.Summary),
+		Changes:        append([]model.ParameterChange(nil), strategy.Changes...),
+		RollbackValues: rollbackChanges(strategy.Changes),
+		Confidence:     clampFloat(strategy.Confidence, 0, 1),
+		Basis:          strings.TrimSpace(strategy.Basis),
+	}
+}
+
 func firstRecommendation(report *model.RecommendationReport) *model.RecommendationItem {
 	if report == nil || len(report.Recommendations) == 0 {
 		return nil
@@ -404,6 +547,9 @@ func firstRecommendation(report *model.RecommendationReport) *model.Recommendati
 }
 
 func firstRecommendationBasis(report *model.RecommendationReport) string {
+	if strategy := recommendedStrategy(report); strategy != nil && strings.TrimSpace(strategy.Basis) != "" {
+		return strings.TrimSpace(strategy.Basis)
+	}
 	if top := firstRecommendation(report); top != nil {
 		return strings.TrimSpace(top.Basis)
 	}
@@ -411,6 +557,9 @@ func firstRecommendationBasis(report *model.RecommendationReport) string {
 }
 
 func firstRecommendationConfidence(report *model.RecommendationReport) float64 {
+	if strategy := recommendedStrategy(report); strategy != nil {
+		return clampFloat(strategy.Confidence, 0, 1)
+	}
 	if top := firstRecommendation(report); top != nil {
 		return clampFloat(top.Confidence, 0, 1)
 	}
@@ -426,6 +575,25 @@ func deriveRequestRateImpact(current *model.ServiceSummary, recommendation *mode
 	}
 	after := applyPctDelta(*current.RequestRateRPS, recommendation.PredictedEffect.ThroughputDeltaPct)
 	delta := recommendation.PredictedEffect.ThroughputDeltaPct
+	return &after, &delta
+}
+
+func derivePreferredRequestRateImpact(current *model.ServiceSummary, report *model.RecommendationReport) (*float64, *float64) {
+	if report == nil {
+		return nil, nil
+	}
+	if strategy := recommendedStrategy(report); strategy != nil {
+		return deriveRequestRateImpactFromEffect(current, strategy.PredictedEffect)
+	}
+	return deriveRequestRateImpact(current, firstRecommendation(report))
+}
+
+func deriveRequestRateImpactFromEffect(current *model.ServiceSummary, effect model.PredictedEffect) (*float64, *float64) {
+	if current == nil || current.RequestRateRPS == nil || effect.ThroughputDeltaPct == 0 {
+		return nil, nil
+	}
+	after := applyPctDelta(*current.RequestRateRPS, effect.ThroughputDeltaPct)
+	delta := effect.ThroughputDeltaPct
 	return &after, &delta
 }
 
@@ -480,6 +648,21 @@ func currentGPUUtilization(report *model.RecommendationReport) *float64 {
 		return floatPtr(report.BaselinePrediction.GPUUtilizationPct)
 	}
 	return nil
+}
+
+func recommendedStrategy(report *model.RecommendationReport) *model.RecommendationStrategy {
+	if report == nil {
+		return nil
+	}
+	for index := range report.StrategyOptions {
+		if report.StrategyOptions[index].Recommended {
+			return &report.StrategyOptions[index]
+		}
+	}
+	if len(report.StrategyOptions) == 0 {
+		return nil
+	}
+	return &report.StrategyOptions[0]
 }
 
 func preferThroughputHeadroom(report *model.RecommendationReport) bool {
@@ -544,6 +727,17 @@ func usesPreciseBenchmarkHeadroom(report *model.RecommendationReport, recommenda
 		strings.Contains(strings.ToLower(report.BaselinePrediction.Basis), "corpus")
 }
 
+func usesPreciseBenchmarkHeadroomForStrategy(report *model.RecommendationReport, strategy *model.RecommendationStrategy) bool {
+	if report == nil || strategy == nil || report.MatchedCorpusProfile == nil || report.BaselinePrediction == nil {
+		return false
+	}
+	if report.MatchedCorpusProfile.MatchScore < corpusPreciseMinScore {
+		return false
+	}
+	basis := strings.ToLower(strings.TrimSpace(strategy.Basis))
+	return strings.Contains(basis, "benchmark") || strings.Contains(basis, "corpus")
+}
+
 func predictedGPULoadPctForOpportunity(currentLoadPct float64, recommendation *model.RecommendationItem) (float64, string, float64, bool) {
 	if recommendation == nil {
 		return 0, "", 0, false
@@ -562,6 +756,44 @@ func predictedGPULoadPctForOpportunity(currentLoadPct float64, recommendation *m
 	basis += "Estimated GPU utilization from predicted throughput uplift."
 	confidence := clampFloat(math.Min(recommendation.Confidence, 0.58), 0.35, 0.58)
 	return predictedLoadPct, basis, confidence, true
+}
+
+func predictedGPULoadPctForStrategy(currentLoadPct float64, strategy *model.RecommendationStrategy) (float64, string, float64, bool) {
+	if strategy == nil {
+		return 0, "", 0, false
+	}
+	if strategy.PredictedEffect.GPUUtilizationPct > 0 {
+		return clampFloat(strategy.PredictedEffect.GPUUtilizationPct, 0, 100), strings.TrimSpace(strategy.Basis), clampFloat(strategy.Confidence, 0, 1), true
+	}
+	if currentLoadPct <= 0 || strategy.PredictedEffect.ThroughputDeltaPct <= 0 {
+		return 0, "", 0, false
+	}
+	predictedLoadPct := clampFloat(currentLoadPct*(1+(strategy.PredictedEffect.ThroughputDeltaPct/100)), currentLoadPct, 100)
+	basis := strings.TrimSpace(strategy.Basis)
+	if basis != "" {
+		basis += " "
+	}
+	basis += "Estimated GPU utilization from predicted throughput uplift."
+	confidence := clampFloat(math.Min(strategy.Confidence, 0.58), 0.35, 0.58)
+	return predictedLoadPct, basis, confidence, true
+}
+
+func preferredGPULoadOpportunity(report *model.RecommendationReport, currentLoadPct float64) (float64, string, float64, bool, bool) {
+	if strategy := recommendedStrategy(report); strategy != nil {
+		predicted, basis, confidence, ok := predictedGPULoadPctForStrategy(currentLoadPct, strategy)
+		if ok {
+			return predicted, basis, confidence, usesPreciseBenchmarkHeadroomForStrategy(report, strategy), true
+		}
+	}
+	recommendation := firstRecommendation(report)
+	if recommendation == nil {
+		return 0, "", 0, false, false
+	}
+	predicted, basis, confidence, ok := predictedGPULoadPctForOpportunity(currentLoadPct, recommendation)
+	if !ok {
+		return 0, "", 0, false, false
+	}
+	return predicted, basis, confidence, usesPreciseBenchmarkHeadroom(report, recommendation), true
 }
 
 func resolveObjective(explicit Objective, analysis *model.AnalysisReport) Objective {

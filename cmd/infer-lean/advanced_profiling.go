@@ -96,23 +96,44 @@ func detectVLLMPID(ctx context.Context) int {
 	patterns := []string{
 		"vllm.entrypoints.openai.api_server",
 		"python.*vllm",
+		"(^|/)vllm($| )",
 	}
+	candidates := map[int][]string{}
 	for _, pattern := range patterns {
-		pid := detectPIDByPattern(ctx, pattern)
-		if pid > 0 {
-			return pid
+		for _, pid := range detectPIDsByPattern(ctx, pattern) {
+			if pid <= 0 {
+				continue
+			}
+			if _, exists := candidates[pid]; exists {
+				continue
+			}
+			args, err := readProcessArgs(pid)
+			if err != nil {
+				debugf("pid detection: failed reading args for pid %d: %v", pid, err)
+				continue
+			}
+			candidates[pid] = args
 		}
 	}
-	return 0
+	return pickBestVLLMPID(candidates)
 }
 
 func detectPIDByPattern(ctx context.Context, pattern string) int {
+	pids := detectPIDsByPattern(ctx, pattern)
+	if len(pids) == 0 {
+		return 0
+	}
+	return pids[0]
+}
+
+func detectPIDsByPattern(ctx context.Context, pattern string) []int {
 	debugf("pid detection: searching pattern %q", pattern)
 	out, err := runCommandCapture(ctx, 10, "pgrep", "-f", pattern)
 	if err != nil {
 		debugf("pid detection: pattern %q not found (%v)", pattern, err)
-		return 0
+		return nil
 	}
+	var pids []int
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -121,11 +142,85 @@ func detectPIDByPattern(ctx context.Context, pattern string) int {
 		pid, err := strconv.Atoi(line)
 		if err == nil && pid > 0 {
 			debugf("pid detection: pattern %q matched pid %d", pattern, pid)
-			return pid
+			pids = append(pids, pid)
 		}
 	}
-	debugf("pid detection: pattern %q returned no parseable pid", pattern)
-	return 0
+	if len(pids) == 0 {
+		debugf("pid detection: pattern %q returned no parseable pid", pattern)
+	}
+	return pids
+}
+
+func pickBestVLLMPID(candidates map[int][]string) int {
+	bestPID := 0
+	bestScore := 0
+	for pid, args := range candidates {
+		score := vllmProcessScore(args)
+		debugf("pid detection: pid %d scored %d for args=%q", pid, score, strings.Join(args, " "))
+		if score > bestScore || (score == bestScore && score > 0 && pid > bestPID) {
+			bestPID = pid
+			bestScore = score
+		}
+	}
+	if bestPID > 0 {
+		debugf("pid detection: selected pid %d with score %d", bestPID, bestScore)
+	}
+	return bestPID
+}
+
+func vllmProcessScore(args []string) int {
+	if len(args) == 0 {
+		return 0
+	}
+	score := 0
+	if isVLLMBenchServeProcess(args) {
+		score -= 100
+	}
+	if isVLLMServeProcess(args) {
+		score += 120
+	}
+	for _, arg := range args {
+		trimmed := strings.TrimSpace(arg)
+		if trimmed == "" {
+			continue
+		}
+		if strings.Contains(trimmed, "vllm.entrypoints.openai.api_server") {
+			score += 150
+		}
+		if filepath.Base(trimmed) == "vllm" {
+			score += 20
+		}
+		if strings.Contains(trimmed, "vllm") {
+			score += 5
+		}
+	}
+	return score
+}
+
+func isVLLMBenchServeProcess(args []string) bool {
+	for i := 0; i < len(args)-1; i++ {
+		if strings.TrimSpace(args[i]) == "bench" && strings.TrimSpace(args[i+1]) == "serve" {
+			return true
+		}
+	}
+	return false
+}
+
+func isVLLMServeProcess(args []string) bool {
+	for i, arg := range args {
+		trimmed := strings.TrimSpace(arg)
+		if strings.Contains(trimmed, "vllm.entrypoints.openai.api_server") {
+			return true
+		}
+		if trimmed != "serve" {
+			continue
+		}
+		if i > 0 && strings.TrimSpace(args[i-1]) == "bench" {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func runBCCProfile(ctx context.Context, binary string, pid, durationSeconds int) model.ProfilingToolResult {

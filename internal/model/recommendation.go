@@ -21,28 +21,30 @@ type SourceAnalysisReference struct {
 }
 
 type RecommendationReport struct {
-	SchemaVersion        string                  `json:"schema_version"`
-	GeneratedAt          time.Time               `json:"generated_at"`
-	ToolName             string                  `json:"tool_name"`
-	ToolVersion          string                  `json:"tool_version"`
-	SourceAnalysis       SourceAnalysisReference `json:"source_analysis_report"`
-	Objective            string                  `json:"optimization_priority"`
-	DeclaredGoal         *DeclaredGoalSummary    `json:"declared_intent,omitempty"`
-	Guardrail            *GuardrailSummary       `json:"guardrail_policy,omitempty"`
-	CurrentServiceState  *ServiceSummary         `json:"service_snapshot,omitempty"`
-	WastedCapacity       *WastedCapacitySummary  `json:"wasted_capacity,omitempty"`
-	PrimaryAction        *PrimaryActionSummary   `json:"recommended_action,omitempty"`
-	PredictedImpact      *PredictedImpactSummary `json:"expected_impact,omitempty"`
-	MatchSummary         *MatchSummary           `json:"benchmark_match_summary,omitempty"`
-	Validation           *ValidationSummary      `json:"validation_checks,omitempty"`
-	AlternativeActions   []PrimaryActionSummary  `json:"alternative_actions,omitempty"`
-	MatchedCorpusProfile *MatchedCorpusProfile   `json:"matched_benchmark_profile,omitempty"`
-	BaselinePrediction   *Prediction             `json:"current_baseline_prediction,omitempty"`
-	CapacityOpportunity  *CapacityOpportunity    `json:"gpu_capacity_headroom,omitempty"`
-	Recommendations      []RecommendationItem    `json:"all_recommendations,omitempty"`
-	ScenarioPrediction   *Prediction             `json:"what_if_prediction,omitempty"`
-	LLMEnhanced          *LLMEnhancedOutput      `json:"llm_enhanced,omitempty"`
-	Warnings             []string                `json:"warnings,omitempty"`
+	SchemaVersion        string                   `json:"schema_version"`
+	GeneratedAt          time.Time                `json:"generated_at"`
+	ToolName             string                   `json:"tool_name"`
+	ToolVersion          string                   `json:"tool_version"`
+	SourceAnalysis       SourceAnalysisReference  `json:"source_analysis_report"`
+	Objective            string                   `json:"optimization_priority"`
+	DeclaredGoal         *DeclaredGoalSummary     `json:"declared_intent,omitempty"`
+	Guardrail            *GuardrailSummary        `json:"guardrail_policy,omitempty"`
+	CurrentServiceState  *ServiceSummary          `json:"service_snapshot,omitempty"`
+	WastedCapacity       *WastedCapacitySummary   `json:"wasted_capacity,omitempty"`
+	PrimaryAction        *PrimaryActionSummary    `json:"recommended_action,omitempty"`
+	PredictedImpact      *PredictedImpactSummary  `json:"expected_impact,omitempty"`
+	MatchSummary         *MatchSummary            `json:"benchmark_match_summary,omitempty"`
+	Validation           *ValidationSummary       `json:"validation_checks,omitempty"`
+	AlternativeActions   []PrimaryActionSummary   `json:"alternative_actions,omitempty"`
+	StrategyOptions      []RecommendationStrategy `json:"strategy_options,omitempty"`
+	MatchedCorpusProfile *MatchedCorpusProfile    `json:"matched_benchmark_profile,omitempty"`
+	BaselinePrediction   *Prediction              `json:"current_baseline_prediction,omitempty"`
+	CapacityOpportunity  *CapacityOpportunity     `json:"gpu_capacity_headroom,omitempty"`
+	Recommendations      []RecommendationItem     `json:"all_recommendations,omitempty"`
+	ScenarioPrediction   *Prediction              `json:"what_if_prediction,omitempty"`
+	ScenarioOptions      []ScenarioOption         `json:"scenario_options,omitempty"`
+	LLMEnhanced          *LLMEnhancedOutput       `json:"llm_enhanced,omitempty"`
+	Warnings             []string                 `json:"warnings,omitempty"`
 }
 
 func (r *RecommendationReport) UnmarshalJSON(data []byte) error {
@@ -167,6 +169,35 @@ type RecommendationItem struct {
 	SafetyNotes          []string          `json:"safety_notes,omitempty"`
 	ValidationChecks     []string          `json:"validation_checks,omitempty"`
 	Basis                string            `json:"basis"`
+}
+
+type RecommendationStrategy struct {
+	ID                 string            `json:"id"`
+	Label              string            `json:"label"`
+	Objective          string            `json:"objective"`
+	Recommended        bool              `json:"recommended"`
+	Summary            string            `json:"summary"`
+	TechnicalRationale string            `json:"technical_rationale,omitempty"`
+	Tradeoff           string            `json:"tradeoff,omitempty"`
+	Changes            []ParameterChange `json:"changes,omitempty"`
+	PredictedEffect    PredictedEffect   `json:"predicted_effect"`
+	Confidence         float64           `json:"confidence,omitempty"`
+	Basis              string            `json:"basis,omitempty"`
+	ValidationChecks   []string          `json:"validation_checks,omitempty"`
+}
+
+type ScenarioOption struct {
+	ID          string            `json:"id"`
+	Kind        string            `json:"kind,omitempty"`
+	Label       string            `json:"label"`
+	Objective   string            `json:"objective,omitempty"`
+	Recommended bool              `json:"recommended,omitempty"`
+	Summary     string            `json:"summary,omitempty"`
+	Changes     []ParameterChange `json:"changes,omitempty"`
+	Prediction  *Prediction       `json:"prediction,omitempty"`
+	Tradeoff    string            `json:"tradeoff,omitempty"`
+	Basis       string            `json:"basis,omitempty"`
+	Confidence  float64           `json:"confidence,omitempty"`
 }
 
 type CapacityOpportunity struct {

@@ -241,6 +241,15 @@ func TestRecommendMatchesCorpusAndBuildsExactRecommendation(t *testing.T) {
 	if recommendationReport.PredictedImpact == nil || recommendationReport.PredictedImpact.GPUUtilizationPct.After == nil {
 		t.Fatalf("expected predicted impact summary, got %+v", recommendationReport.PredictedImpact)
 	}
+	if len(recommendationReport.ScenarioOptions) < 3 {
+		t.Fatalf("expected baseline and strategy scenarios, got %+v", recommendationReport.ScenarioOptions)
+	}
+	if recommendationReport.ScenarioOptions[0].Kind != "baseline" {
+		t.Fatalf("expected baseline scenario first, got %+v", recommendationReport.ScenarioOptions[0])
+	}
+	if !recommendationReport.ScenarioOptions[1].Recommended {
+		t.Fatalf("expected recommended strategy scenario, got %+v", recommendationReport.ScenarioOptions[1])
+	}
 }
 
 func TestRecommendBuildsIssueLinkedRecommendationsWithSharedActionIDs(t *testing.T) {
@@ -284,14 +293,121 @@ func TestRecommendBuildsIssueLinkedRecommendationsWithSharedActionIDs(t *testing
 	if recommendationReport.Recommendations[0].Priority != 1 || recommendationReport.Recommendations[1].Priority != 2 {
 		t.Fatalf("expected sequential priorities, got %+v", recommendationReport.Recommendations)
 	}
-	if recommendationReport.AlternativeActions == nil || len(recommendationReport.AlternativeActions) != 1 {
-		t.Fatalf("expected one alternative action summary, got %+v", recommendationReport.AlternativeActions)
+	if recommendationReport.StrategyOptions == nil || len(recommendationReport.StrategyOptions) != 2 {
+		t.Fatalf("expected two strategy options, got %+v", recommendationReport.StrategyOptions)
+	}
+	if recommendationReport.AlternativeActions == nil || len(recommendationReport.AlternativeActions) < 2 {
+		t.Fatalf("expected alternative strategy plus remaining actions, got %+v", recommendationReport.AlternativeActions)
 	}
 	if recommendationReport.Recommendations[0].IssueID != "queue_dominated_ttft" {
 		t.Fatalf("expected first recommendation to follow issue ranking, got %+v", recommendationReport.Recommendations[0])
 	}
 	if recommendationReport.Recommendations[0].SharedActionID == "" || recommendationReport.Recommendations[0].SharedActionID != recommendationReport.Recommendations[1].SharedActionID {
 		t.Fatalf("expected shared_action_id for identical rollout actions, got %+v", recommendationReport.Recommendations)
+	}
+}
+
+func TestRecommendBuildsTwoStrategiesWithoutCorpus(t *testing.T) {
+	tmp := t.TempDir()
+	analysisPath := filepath.Join(tmp, "analysis.json")
+
+	report := throughputHeadroomAnalysisReport()
+	mustWriteJSON(t, analysisPath, report)
+
+	recommendationReport, err := Recommend(context.Background(), Options{
+		AnalysisPath: analysisPath,
+		Objective:    ThroughputFirstObjective,
+	})
+	if err != nil {
+		t.Fatalf("recommend returned error: %v", err)
+	}
+	if len(recommendationReport.StrategyOptions) != 2 {
+		t.Fatalf("expected two strategy options, got %+v", recommendationReport.StrategyOptions)
+	}
+	if !recommendationReport.StrategyOptions[0].Recommended {
+		t.Fatalf("expected first strategy to be marked recommended, got %+v", recommendationReport.StrategyOptions)
+	}
+	if recommendationReport.StrategyOptions[0].ID != "throughput_push" {
+		t.Fatalf("expected throughput strategy to be preferred, got %+v", recommendationReport.StrategyOptions[0])
+	}
+	if recommendationReport.StrategyOptions[1].ID != "latency_guardrail" {
+		t.Fatalf("expected latency alternative strategy, got %+v", recommendationReport.StrategyOptions[1])
+	}
+}
+
+func TestRecommendBuildsStabilizeFirstStrategyForHostBlockers(t *testing.T) {
+	tmp := t.TempDir()
+	analysisPath := filepath.Join(tmp, "analysis.json")
+
+	report := throughputHeadroomAnalysisReport()
+	report.WorkloadProfile = &model.WorkloadProfile{
+		SchemaVersion:  model.WorkloadProfileSchemaVersion,
+		Source:         model.WorkloadProfileSourceUserInput,
+		ServingPattern: model.ServingPatternMixed,
+		Objective:      string(BalancedObjective),
+	}
+	report.AnalysisSummary.Findings = []model.Finding{
+		{
+			ID:                   "cpu_or_host_bottleneck",
+			Category:             "host",
+			Status:               model.FindingStatusPresent,
+			Severity:             model.SeverityHigh,
+			Confidence:           0.90,
+			Summary:              "Host-side work appears to limit throughput before GPU saturation.",
+			TechnicalExplanation: "CPU-side scheduling and transport are limiting GPU occupancy.",
+		},
+	}
+	mustWriteJSON(t, analysisPath, report)
+
+	recommendationReport, err := Recommend(context.Background(), Options{
+		AnalysisPath: analysisPath,
+	})
+	if err != nil {
+		t.Fatalf("recommend returned error: %v", err)
+	}
+	if len(recommendationReport.StrategyOptions) == 0 || recommendationReport.StrategyOptions[0].ID != "stabilize_first" {
+		t.Fatalf("expected stabilize-first strategy for blocker-led balanced workload, got %+v", recommendationReport.StrategyOptions)
+	}
+}
+
+func TestRecommendAddsTextOnlyMultimodalRecommendation(t *testing.T) {
+	tmp := t.TempDir()
+	analysisPath := filepath.Join(tmp, "analysis.json")
+
+	report := throughputHeadroomAnalysisReport()
+	report.CurrentVLLMConfigurations["model_name"] = "Qwen2.5-VL-7B-Instruct"
+	report.CurrentVLLMConfigurations["language_model_only"] = false
+	report.AnalysisSummary.Findings = []model.Finding{
+		{
+			ID:         "text_only_workload_on_multimodal_stack",
+			Category:   "multimodal",
+			Status:     model.FindingStatusPresent,
+			Severity:   model.SeverityMedium,
+			Confidence: 0.82,
+			Rank:       1,
+			Summary:    "Observed traffic looks text-only on a multimodal-capable stack.",
+		},
+	}
+	mustWriteJSON(t, analysisPath, report)
+
+	recommendationReport, err := Recommend(context.Background(), Options{
+		AnalysisPath: analysisPath,
+	})
+	if err != nil {
+		t.Fatalf("recommend returned error: %v", err)
+	}
+	found := false
+	for _, item := range recommendationReport.Recommendations {
+		if item.IssueID != "text_only_workload_on_multimodal_stack" {
+			continue
+		}
+		found = true
+		if len(item.Changes) == 0 || item.Changes[0].Name != "language_model_only" || item.Changes[0].RecommendedValue != true {
+			t.Fatalf("expected language_model_only recommendation, got %+v", item.Changes)
+		}
+	}
+	if !found {
+		t.Fatalf("expected text-only multimodal recommendation, got %+v", recommendationReport.Recommendations)
 	}
 }
 
@@ -341,6 +457,13 @@ func TestRecommendAddsScenarioPredictionForExplicitSet(t *testing.T) {
 	}
 	if recommendationReport.ScenarioPrediction.ThroughputTokensPerSecond != 5200 {
 		t.Fatalf("unexpected scenario prediction: %+v", recommendationReport.ScenarioPrediction)
+	}
+	if len(recommendationReport.ScenarioOptions) < 4 {
+		t.Fatalf("expected baseline, strategy, and custom what-if scenarios, got %+v", recommendationReport.ScenarioOptions)
+	}
+	last := recommendationReport.ScenarioOptions[len(recommendationReport.ScenarioOptions)-1]
+	if last.Kind != "custom_what_if" || last.Prediction == nil {
+		t.Fatalf("expected trailing custom what-if scenario, got %+v", last)
 	}
 }
 
