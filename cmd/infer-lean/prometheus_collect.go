@@ -23,7 +23,7 @@ import (
 )
 
 type PrometheusCollectionOptions struct {
-	DurationMinutes          int
+	DurationSeconds          int
 	StepSeconds              int
 	WorkDir                  string
 	PrometheusBinary         string
@@ -96,10 +96,10 @@ func collectPrometheusMetrics(ctx context.Context, opts PrometheusCollectionOpti
 		ctx = context.Background()
 	}
 	processCtx := context.WithoutCancel(ctx)
-	debugf("prometheus collection: started duration_minutes=%d step_seconds=%d", opts.DurationMinutes, opts.StepSeconds)
-	duration := time.Duration(opts.DurationMinutes) * time.Minute
-	if opts.DurationMinutes <= 0 {
-		duration = time.Duration(defaultCollectionDurationMinutes) * time.Minute
+	debugf("prometheus collection: started duration_seconds=%d step_seconds=%d", opts.DurationSeconds, opts.StepSeconds)
+	duration := time.Duration(opts.DurationSeconds) * time.Second
+	if opts.DurationSeconds <= 0 {
+		duration = time.Duration(defaultCollectionDurationSeconds) * time.Second
 	}
 	profilingDurationSeconds := opts.ProfilingDurationSeconds
 	if profilingDurationSeconds <= 0 {

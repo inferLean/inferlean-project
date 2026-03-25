@@ -47,7 +47,8 @@ func runCollectWithContext(ctx context.Context, args []string, stdout, stderr io
 	workloadProfilePath := fs.String("workload-profile-file", "", "")
 	intentPath := fs.String("intent-file", "", "")
 	collectPrometheus := fs.Bool("collect-prometheus", true, "")
-	durationMinutes := fs.Int("duration-minutes", defaultCollectionDurationMinutes, "")
+	durationSeconds := fs.Int("duration-seconds", defaultCollectionDurationSeconds, "")
+	durationMinutes := fs.Int("duration-minutes", 0, "")
 	stepSeconds := fs.Int("prometheus-step-seconds", defaultPrometheusStepSeconds, "")
 	prometheusBin := fs.String("prometheus-bin", "", "")
 	nodeExporterBin := fs.String("node-exporter-bin", "", "")
@@ -81,7 +82,8 @@ func runCollectWithContext(ctx context.Context, args []string, stdout, stderr io
 		fmt.Fprintln(stderr, "  --workload-profile-file <path> Optional workload profile JSON/YAML input")
 		fmt.Fprintln(stderr, "  --intent-file <path>      Optional declared-intent JSON input (same schema as workload-profile)")
 		fmt.Fprintln(stderr, "  --collect-prometheus      Run prometheus/node_exporter/dcgm-exporter for collection when metrics-file is not provided (default: true)")
-		fmt.Fprintf(stderr, "  --duration-minutes <int>  Prometheus collection duration in minutes (default: %d)\n", defaultCollectionDurationMinutes)
+		fmt.Fprintf(stderr, "  --duration-seconds <int>  Collection duration in seconds (default: %d)\n", defaultCollectionDurationSeconds)
+		fmt.Fprintln(stderr, "  --duration-minutes <int>  Deprecated legacy duration override in minutes")
 		fmt.Fprintf(stderr, "  --prometheus-step-seconds Prometheus query range step in seconds (default: %d)\n", defaultPrometheusStepSeconds)
 		fmt.Fprintln(stderr, "  --prometheus-bin <path>   Prometheus binary path (empty means auto-install/auto-detect)")
 		fmt.Fprintln(stderr, "  --node-exporter-bin <path> node_exporter binary path (empty means auto-install/auto-detect)")
@@ -112,24 +114,34 @@ func runCollectWithContext(ctx context.Context, args []string, stdout, stderr io
 		return fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
 	vllmMetricsTargetProvided := false
+	durationSecondsProvided := false
+	durationMinutesProvided := false
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "vllm-metrics-target" {
 			vllmMetricsTargetProvided = true
 		}
+		if f.Name == "duration-seconds" {
+			durationSecondsProvided = true
+		}
+		if f.Name == "duration-minutes" {
+			durationMinutesProvided = true
+		}
 	})
 	configureDebug(*debugMode, stderr)
 	debugf("starting collect command")
+	collectionDurationSeconds, durationSource, err := resolveCollectionDurationSeconds(*durationSeconds, durationSecondsProvided, *durationMinutes, durationMinutesProvided)
+	if err != nil {
+		return err
+	}
 	recordCLIEvent("collect.start", map[string]string{
 		"collect_prometheus": fmt.Sprintf("%t", *collectPrometheus),
 		"profiling_enabled":  fmt.Sprintf("%t", *enableProfiling),
+		"duration_source":    durationSource,
 	})
 	ui := newTerminalUI(stdout, *plainOutput)
 
 	if err := validateDeploymentType(*deploymentType); err != nil {
 		return err
-	}
-	if *durationMinutes <= 0 {
-		return fmt.Errorf("duration-minutes must be > 0")
 	}
 	if *stepSeconds <= 0 {
 		return fmt.Errorf("prometheus-step-seconds must be > 0")
@@ -204,7 +216,7 @@ func runCollectWithContext(ctx context.Context, args []string, stdout, stderr io
 		}
 		debugf("collecting Prometheus metrics")
 		generatedMetricsPath, err := collectPrometheusMetrics(ctx, PrometheusCollectionOptions{
-			DurationMinutes:          *durationMinutes,
+			DurationSeconds:          collectionDurationSeconds,
 			StepSeconds:              *stepSeconds,
 			WorkDir:                  strings.TrimSpace(*prometheusWorkDir),
 			PrometheusBinary:         strings.TrimSpace(*prometheusBin),
@@ -215,7 +227,7 @@ func runCollectWithContext(ctx context.Context, args []string, stdout, stderr io
 			CollectBCC:               *collectBCC,
 			CollectPySpy:             *collectPySpy,
 			CollectNSYS:              *collectNSYS,
-			ProfilingDurationSeconds: *durationMinutes * 60,
+			ProfilingDurationSeconds: collectionDurationSeconds,
 			ProfilingWorkDir:         strings.TrimSpace(*profilingWorkDir),
 			VLLMPID:                  *vllmPID,
 			BCCBinary:                strings.TrimSpace(*bccBin),
@@ -291,6 +303,26 @@ func runCollectWithContext(ctx context.Context, args []string, stdout, stderr io
 		fmt.Fprintln(stdout, absOutput)
 	}
 	return nil
+}
+
+func resolveCollectionDurationSeconds(durationSeconds int, durationSecondsProvided bool, durationMinutes int, durationMinutesProvided bool) (int, string, error) {
+	switch {
+	case durationSecondsProvided:
+		if durationSeconds <= 0 {
+			return 0, "", fmt.Errorf("duration-seconds must be > 0")
+		}
+		return durationSeconds, "seconds", nil
+	case durationMinutesProvided:
+		if durationMinutes <= 0 {
+			return 0, "", fmt.Errorf("duration-minutes must be > 0")
+		}
+		return durationMinutes * 60, "minutes_legacy", nil
+	default:
+		if durationSeconds <= 0 {
+			return 0, "", fmt.Errorf("duration-seconds must be > 0")
+		}
+		return durationSeconds, "default", nil
+	}
 }
 
 func validateDeploymentType(value string) error {

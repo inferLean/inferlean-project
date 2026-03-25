@@ -113,11 +113,33 @@ func TestCollectHelpShowsUpdatedCollectionDefaults(t *testing.T) {
 		t.Fatalf("expected exit code 0, got %d", exitCode)
 	}
 	help := stderr.String()
-	if !strings.Contains(help, "Prometheus collection duration in minutes (default: 1)") {
+	if !strings.Contains(help, "Collection duration in seconds (default: 30)") {
 		t.Fatalf("expected updated duration default in help output, got %q", help)
 	}
-	if !strings.Contains(help, "Prometheus query range step in seconds (default: 10)") {
+	if !strings.Contains(help, "Deprecated legacy duration override in minutes") {
+		t.Fatalf("expected legacy duration note in help output, got %q", help)
+	}
+	if !strings.Contains(help, "Prometheus query range step in seconds (default: 3)") {
 		t.Fatalf("expected updated step default in help output, got %q", help)
+	}
+}
+
+func TestRunHelpShowsDecisionOutputAndCollectionDefaults(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	exitCode := Execute([]string{"run", "-h"}, stdout, stderr)
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+	help := stderr.String()
+	for _, want := range []string{
+		"print the decision-oriented optimization summary",
+		"Default collection window: 30 seconds sampled every 3 seconds",
+		"All collect flags are accepted by run.",
+	} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("expected run help to include %q, got %q", want, help)
+		}
 	}
 }
 
@@ -1083,7 +1105,7 @@ func TestRunFallsBackToManualUploadOnNetworkTriggerFailure(t *testing.T) {
 	if !strings.Contains(errOutput, "automatic backend trigger failed due to a network issue") {
 		t.Fatalf("expected network fallback warning, got %q", errOutput)
 	}
-	expectedTriggerURL := unreachableBaseURL + "/trigger"
+	expectedTriggerURL := unreachableBaseURL + "/optimizations/new"
 	if !strings.Contains(errOutput, expectedTriggerURL) {
 		t.Fatalf("expected manual trigger URL %q in stderr, got %q", expectedTriggerURL, errOutput)
 	}
@@ -1193,6 +1215,39 @@ func TestResolveCollectStepSecondsDefaultsAndOverrides(t *testing.T) {
 	}
 	if got := resolveCollectStepSeconds([]string{"--prometheus-step-seconds", "0"}); got != defaultPrometheusStepSeconds {
 		t.Fatalf("expected fallback step %d for invalid override, got %d", defaultPrometheusStepSeconds, got)
+	}
+}
+
+func TestResolveCollectionDurationSecondsDefaultsAndOverrides(t *testing.T) {
+	duration, source, err := resolveCollectionDurationSeconds(defaultCollectionDurationSeconds, false, 0, false)
+	if err != nil {
+		t.Fatalf("expected default duration to resolve, got %v", err)
+	}
+	if duration != defaultCollectionDurationSeconds || source != "default" {
+		t.Fatalf("expected default duration %d/default, got %d/%s", defaultCollectionDurationSeconds, duration, source)
+	}
+
+	duration, source, err = resolveCollectionDurationSeconds(45, true, 0, false)
+	if err != nil {
+		t.Fatalf("expected seconds override to resolve, got %v", err)
+	}
+	if duration != 45 || source != "seconds" {
+		t.Fatalf("expected seconds override 45/seconds, got %d/%s", duration, source)
+	}
+
+	duration, source, err = resolveCollectionDurationSeconds(defaultCollectionDurationSeconds, false, 2, true)
+	if err != nil {
+		t.Fatalf("expected minutes override to resolve, got %v", err)
+	}
+	if duration != 120 || source != "minutes_legacy" {
+		t.Fatalf("expected legacy minutes override 120/minutes_legacy, got %d/%s", duration, source)
+	}
+
+	if _, _, err := resolveCollectionDurationSeconds(0, true, 0, false); err == nil {
+		t.Fatalf("expected invalid seconds override to fail")
+	}
+	if _, _, err := resolveCollectionDurationSeconds(defaultCollectionDurationSeconds, false, 0, true); err == nil {
+		t.Fatalf("expected invalid minutes override to fail")
 	}
 }
 

@@ -1,6 +1,6 @@
 package main
 
 const (
-	defaultCollectionDurationMinutes = 1
-	defaultPrometheusStepSeconds     = 10
+	defaultCollectionDurationSeconds = 30
+	defaultPrometheusStepSeconds     = 3
 )

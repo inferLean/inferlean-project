@@ -203,7 +203,7 @@ func runEndToEnd(args []string, stdout, stderr io.Writer) error {
 			if persistErr != nil {
 				return fmt.Errorf("%w (also failed to save collector JSON for manual upload: %v)", err, persistErr)
 			}
-			triggerPage := fmt.Sprintf("%s/trigger", strings.TrimRight(baseURL, "/"))
+			triggerPage := fmt.Sprintf("%s/optimizations/new", strings.TrimRight(baseURL, "/"))
 			fmt.Fprintln(stderr, "warning: automatic backend trigger failed due to a network issue.")
 			fmt.Fprintf(stderr, "collector JSON saved for manual upload: %s\n", manualUploadPath)
 			fmt.Fprintf(stderr, "open %s and upload the saved file manually.\n", triggerPage)
@@ -299,6 +299,8 @@ func printRunUsage(w io.Writer) {
 	fmt.Fprintln(w, "  3) wait for analysis + optimization report completion")
 	fmt.Fprintln(w, "  4) print the decision-oriented optimization summary")
 	fmt.Fprintln(w, "  5) open dashboard /optimizations/{id} in browser")
+	fmt.Fprintln(w, "")
+	fmt.Fprintf(w, "Default collection window: %d seconds sampled every %d seconds\n", defaultCollectionDurationSeconds, defaultPrometheusStepSeconds)
 	fmt.Fprintln(w, "")
 	fmt.Fprintf(w, "Environment:\n  %s=<base URL> (default: %s)\n", inferleanBaseURLEnv, defaultInferleanBaseURL)
 	fmt.Fprintf(w, "  %s=<bearer token> (optional, used for authenticated backend routes)\n", inferleanAuthTokenEnv)
