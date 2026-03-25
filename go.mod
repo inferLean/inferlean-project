@@ -1,4 +1,4 @@
-module github.com/inferLean/inferlean-project
+module github.com/inferLean/inferlean-project/cli
 
 go 1.25.1
 
@@ -6,6 +6,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.0.0
 	github.com/coreos/go-oidc/v3 v3.17.0
 	github.com/google/uuid v1.6.0
+	github.com/inferLean/inferlean-project v0.0.0
 	github.com/swaggo/http-swagger v1.3.4
 	github.com/swaggo/swag v1.16.6
 	gorm.io/driver/postgres v1.6.0
@@ -46,3 +47,5 @@ require (
 	golang.org/x/tools v0.26.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
+
+replace github.com/inferLean/inferlean-project => ..
