@@ -64,6 +64,15 @@ func ExtractFeatures(report *model.AnalysisReport) FeatureSet {
 	} else if loadPct, ok := metricAveragePct(features.Metrics, "DCGM_FI_PROF_GR_ENGINE_ACTIVE"); ok {
 		features.AvgGPUComputeLoadPct = loadPct
 		features.ComputeLoadSource = "dcgm_gr_engine_active"
+	} else if loadPct, ok := maxMetricAveragePct(
+		features.Metrics,
+		"DCGM_FI_PROF_PIPE_TENSOR_ACTIVE",
+		"DCGM_FI_PROF_PIPE_FP16_ACTIVE",
+		"DCGM_FI_PROF_PIPE_FP32_ACTIVE",
+		"DCGM_FI_PROF_PIPE_FP64_ACTIVE",
+	); ok {
+		features.AvgGPUComputeLoadPct = loadPct
+		features.ComputeLoadSource = "dcgm_pipe_active_max"
 	} else {
 		features.AvgGPUComputeLoadPct = features.AvgGPUUtilizationPct
 		features.ComputeLoadSource = "gpu_utilization_proxy"
@@ -445,7 +454,7 @@ func featureSetFromSummary(summary model.FeatureSummary) FeatureSet {
 
 func hasMeasuredComputeLoad(features FeatureSet) bool {
 	switch strings.TrimSpace(features.ComputeLoadSource) {
-	case "dcgm_sm_active", "dcgm_gr_engine_active":
+	case "dcgm_sm_active", "dcgm_gr_engine_active", "dcgm_pipe_active_max":
 		return true
 	default:
 		return false
@@ -464,6 +473,20 @@ func saturationSource(features FeatureSet) string {
 		return "gpu_utilization_proxy"
 	}
 	return ""
+}
+
+func maxMetricAveragePct(metrics map[string]MetricSummary, names ...string) (float64, bool) {
+	best := 0.0
+	found := false
+	for _, name := range names {
+		if value, ok := metricAveragePct(metrics, name); ok {
+			if !found || value > best {
+				best = value
+			}
+			found = true
+		}
+	}
+	return best, found
 }
 
 func requestLatencyPercentilesMS(report *model.AnalysisReport) (p50MS, p90MS, p99MS *float64, available bool) {

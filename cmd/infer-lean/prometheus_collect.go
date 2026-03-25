@@ -529,6 +529,7 @@ samplingLoop:
 				collectedQueries++
 				debugf("prometheus collection: collected %d dcgm_exporter metric series", len(dcgmSeries))
 			}
+			recordDCGMProfilerCoverage(collectionOutputs, dcgmSeries)
 		}
 	}
 	for ts, metrics := range fallbackSamples {
@@ -607,6 +608,63 @@ samplingLoop:
 	}
 	debugf("prometheus collection: metrics payload written to %s", metricsPath)
 	return metricsPath, nil
+}
+
+var preferredDCGMProfilerMetrics = []string{
+	"DCGM_FI_PROF_SM_ACTIVE",
+	"DCGM_FI_PROF_GR_ENGINE_ACTIVE",
+	"DCGM_FI_PROF_PIPE_TENSOR_ACTIVE",
+	"DCGM_FI_PROF_PIPE_FP16_ACTIVE",
+	"DCGM_FI_PROF_PIPE_FP32_ACTIVE",
+	"DCGM_FI_PROF_PIPE_FP64_ACTIVE",
+	"DCGM_FI_PROF_DRAM_ACTIVE",
+}
+
+func recordDCGMProfilerCoverage(outputs map[string]string, dcgmSeries map[string]map[int64]float64) {
+	if outputs == nil {
+		return
+	}
+	found, missing := summarizeDCGMProfilerCoverage(dcgmSeries)
+	outputs["dcgm_profiler_metrics_available"] = fmt.Sprintf("%t", len(found) > 0)
+	if len(found) > 0 {
+		outputs["dcgm_profiler_metrics_found"] = strings.Join(found, ",")
+	}
+	if len(missing) > 0 {
+		outputs["dcgm_profiler_metrics_missing"] = strings.Join(missing, ",")
+	}
+	if len(found) == 0 {
+		outputs["dcgm_profiler_warning"] = "DCGM exporter was reachable but did not expose SM, GR engine, tensor/FP pipe, or DRAM profiling counters."
+	}
+}
+
+func summarizeDCGMProfilerCoverage(dcgmSeries map[string]map[int64]float64) (found []string, missing []string) {
+	present := map[string]bool{}
+	for metricName, series := range dcgmSeries {
+		if len(series) == 0 {
+			continue
+		}
+		baseName := prometheusMetricBaseName(metricName)
+		if baseName == "" {
+			baseName = strings.TrimSpace(metricName)
+		}
+		present[baseName] = true
+	}
+	for _, metricName := range preferredDCGMProfilerMetrics {
+		if present[metricName] {
+			found = append(found, metricName)
+		} else {
+			missing = append(missing, metricName)
+		}
+	}
+	return found, missing
+}
+
+func prometheusMetricBaseName(metricName string) string {
+	metricName = strings.TrimSpace(metricName)
+	if idx := strings.Index(metricName, "{"); idx >= 0 {
+		return metricName[:idx]
+	}
+	return metricName
 }
 
 func buildPrometheusConfig(nodePort, dcgmPort int, vllmTarget, vllmMetricsPath string) string {

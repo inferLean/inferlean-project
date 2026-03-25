@@ -195,3 +195,35 @@ func TestExtractSemanticVersion(t *testing.T) {
 		t.Fatalf("expected 3.3.9, got %q", got)
 	}
 }
+
+func TestSummarizeDCGMProfilerCoverage(t *testing.T) {
+	found, missing := summarizeDCGMProfilerCoverage(map[string]map[int64]float64{
+		`DCGM_FI_PROF_SM_ACTIVE{gpu="0"}`:          {1: 92},
+		`DCGM_FI_PROF_DRAM_ACTIVE{gpu="0"}`:        {1: 35},
+		`DCGM_FI_PROF_PIPE_TENSOR_ACTIVE{gpu="0"}`: {1: 64},
+	})
+
+	if !strings.Contains(strings.Join(found, ","), "DCGM_FI_PROF_SM_ACTIVE") {
+		t.Fatalf("expected SM active in found metrics, got %+v", found)
+	}
+	if !strings.Contains(strings.Join(found, ","), "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE") {
+		t.Fatalf("expected tensor active in found metrics, got %+v", found)
+	}
+	if !strings.Contains(strings.Join(missing, ","), "DCGM_FI_PROF_GR_ENGINE_ACTIVE") {
+		t.Fatalf("expected GR engine active in missing metrics, got %+v", missing)
+	}
+}
+
+func TestRecordDCGMProfilerCoverageWarnsWhenProfilerMetricsAbsent(t *testing.T) {
+	outputs := map[string]string{}
+	recordDCGMProfilerCoverage(outputs, map[string]map[int64]float64{
+		`DCGM_FI_DEV_GPU_UTIL{gpu="0"}`: {1: 97},
+	})
+
+	if outputs["dcgm_profiler_metrics_available"] != "false" {
+		t.Fatalf("expected profiler metrics to be unavailable, got %+v", outputs)
+	}
+	if !strings.Contains(outputs["dcgm_profiler_warning"], "did not expose SM, GR engine, tensor/FP pipe, or DRAM profiling counters") {
+		t.Fatalf("expected profiler warning, got %+v", outputs)
+	}
+}

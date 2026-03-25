@@ -283,6 +283,59 @@ func TestNormalizeReportWarnsWhenSaturationUsesUtilizationProxy(t *testing.T) {
 	}
 }
 
+func TestNormalizeReportUsesMeasuredPipeActivityWhenSMCountersMissing(t *testing.T) {
+	report := syntheticReport(8, map[string]float64{
+		"DCGM_FI_PROF_PIPE_TENSOR_ACTIVE":         62,
+		"DCGM_FI_PROF_PIPE_FP16_ACTIVE":           48,
+		"vllm:num_requests_running":               3,
+		"vllm:num_requests_waiting":               0,
+		"vllm:request_success_total":              100,
+		"vllm:generation_tokens_total":            8000,
+		"vllm:prompt_tokens_total":                4000,
+		"vllm:time_to_first_token_seconds_sum":    20,
+		"vllm:time_to_first_token_seconds_count":  100,
+		"vllm:request_queue_time_seconds_sum":     4,
+		"vllm:request_queue_time_seconds_count":   100,
+		"vllm:request_prefill_time_seconds_sum":   12,
+		"vllm:request_prefill_time_seconds_count": 100,
+		"vllm:request_decode_time_seconds_sum":    18,
+		"vllm:request_decode_time_seconds_count":  100,
+	}, map[string]float64{
+		"DCGM_FI_PROF_PIPE_TENSOR_ACTIVE":         68,
+		"DCGM_FI_PROF_PIPE_FP16_ACTIVE":           44,
+		"vllm:num_requests_running":               3.2,
+		"vllm:num_requests_waiting":               0,
+		"vllm:request_success_total":              140,
+		"vllm:generation_tokens_total":            11000,
+		"vllm:prompt_tokens_total":                6000,
+		"vllm:time_to_first_token_seconds_sum":    28,
+		"vllm:time_to_first_token_seconds_count":  140,
+		"vllm:request_queue_time_seconds_sum":     6,
+		"vllm:request_queue_time_seconds_count":   140,
+		"vllm:request_prefill_time_seconds_sum":   18,
+		"vllm:request_prefill_time_seconds_count": 140,
+		"vllm:request_decode_time_seconds_sum":    24,
+		"vllm:request_decode_time_seconds_count":  140,
+	})
+
+	normalized := NormalizeReport(report, BalancedIntent)
+	if normalized.CurrentLoadSummary == nil {
+		t.Fatalf("expected current load summary")
+	}
+	if normalized.CurrentLoadSummary.ComputeLoadSource != "dcgm_pipe_active_max" {
+		t.Fatalf("expected pipe-activity compute source, got %+v", normalized.CurrentLoadSummary)
+	}
+	if normalized.CurrentLoadSummary.SaturationSource != "measured" {
+		t.Fatalf("expected measured saturation source, got %+v", normalized.CurrentLoadSummary)
+	}
+	if normalized.CurrentLoadSummary.RealSaturationMetricsAvailable != true {
+		t.Fatalf("expected real saturation metrics to be available, got %+v", normalized.CurrentLoadSummary)
+	}
+	if containsAll(strings.Join(normalized.Warnings, "\n"), "GPU utilization as a proxy") {
+		t.Fatalf("did not expect proxy warning, got %+v", normalized.Warnings)
+	}
+}
+
 func TestBuildCurrentLoadSummaryClassifiesCPUBound(t *testing.T) {
 	report := syntheticReport(92, map[string]float64{
 		"gpu_utilization_pct":                     22,

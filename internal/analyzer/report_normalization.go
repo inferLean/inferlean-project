@@ -43,18 +43,45 @@ func NormalizeReport(report *model.AnalysisReport, fallbackIntent WorkloadIntent
 	if report.ServiceSummary == nil {
 		report.ServiceSummary = buildServiceSummary(report, intent)
 	}
-	report.Warnings = appendSaturationWarnings(report.Warnings, features)
+	report.Warnings = appendSaturationWarnings(report.Warnings, report, features)
 	return report
 }
 
-func appendSaturationWarnings(existing []string, features FeatureSet) []string {
+func appendSaturationWarnings(existing []string, report *model.AnalysisReport, features FeatureSet) []string {
 	if strings.TrimSpace(features.SaturationSource) != "gpu_utilization_proxy" {
 		return existing
 	}
+	reason := "DCGM compute counters were not present in the collected telemetry."
+	if detailed := saturationWarningReason(report); detailed != "" {
+		reason = detailed
+	}
 	return appendUniqueWarning(
 		existing,
-		"Real GPU saturation metrics unavailable: missing DCGM compute counters (DCGM_FI_PROF_SM_ACTIVE / DCGM_FI_PROF_GR_ENGINE_ACTIVE), so InferLean is showing GPU utilization as a proxy instead of measured compute saturation.",
+		"Real GPU saturation metrics unavailable: "+reason+" InferLean is showing GPU utilization as a proxy instead of measured compute saturation.",
 	)
+}
+
+func saturationWarningReason(report *model.AnalysisReport) string {
+	if report == nil {
+		return ""
+	}
+	outputs := report.MetricCollectionOutputs
+	switch {
+	case strings.TrimSpace(outputs["dcgm_profiler_warning"]) != "":
+		return strings.TrimSpace(outputs["dcgm_profiler_warning"])
+	case strings.TrimSpace(outputs["dcgm_exporter_warning"]) != "":
+		return strings.TrimSpace(outputs["dcgm_exporter_warning"])
+	case strings.TrimSpace(outputs["dcgm_exporter_start"]) == "skipped":
+		return "DCGM exporter was unavailable during collection."
+	case strings.TrimSpace(outputs["dcgm_profiler_metrics_available"]) == "false":
+		missing := strings.TrimSpace(outputs["dcgm_profiler_metrics_missing"])
+		if missing != "" {
+			return "DCGM exporter was reachable but did not expose profiler counters: " + missing + "."
+		}
+		return "DCGM exporter was reachable but did not expose the requested profiler counters."
+	default:
+		return ""
+	}
 }
 
 func appendUniqueWarning(existing []string, warning string) []string {
