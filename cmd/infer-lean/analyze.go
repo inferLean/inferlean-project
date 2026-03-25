@@ -250,6 +250,12 @@ func runCollectWithContext(ctx context.Context, args []string, stdout, stderr io
 	if discoveredVersion != "" {
 		payload["vllm_version"] = discoveredVersion
 	}
+	osInfo, gpuInfo, warnings := analyzer.CollectEnvironment(context.Background())
+	payload["os_information"] = osInfo
+	payload["gpu_information"] = gpuInfo
+	if len(warnings) > 0 {
+		payload["warnings"] = warnings
+	}
 	fileConfig, err := analyzer.LoadConfigFile(cleanConfigPath)
 	if err != nil {
 		return fmt.Errorf("config parse failed: %w", err)

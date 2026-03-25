@@ -25,6 +25,11 @@ func ExtractFeatures(report *model.AnalysisReport) FeatureSet {
 	features.IntervalSeconds = metricIntervalSeconds(report.CollectedMetrics)
 	features.AverageCPUUtilizationPct = report.OSInformation.AverageCPUUtilizationPct
 	features.Metrics = summarizeCollectedMetrics(report.CollectedMetrics)
+	if features.AverageCPUUtilizationPct <= 0 {
+		if cpuUtil, ok := metricAveragePct(features.Metrics, "node_cpu_utilization_pct"); ok {
+			features.AverageCPUUtilizationPct = cpuUtil
+		}
+	}
 	config := flattenMap(report.CurrentVLLMConfigurations)
 	features.ModelName = lookupString(config, "model_name", "model", "served_model_name")
 	features.MultimodalLikely = containsAnyFold(features.ModelName, "vl", "vision", "llava", "pixtral", "internvl")

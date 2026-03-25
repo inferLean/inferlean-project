@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/inferLean/inferlean-project/internal/model"
@@ -226,21 +227,26 @@ func collectPrometheusMetrics(ctx context.Context, opts PrometheusCollectionOpti
 		collectionOutputs["dcgm_exporter_binary"] = "reused existing endpoint"
 		debugf("prometheus collection: reusing existing dcgm_exporter endpoint")
 	} else {
-		dcgmBinary, err := resolveOrInstallTool(ctx, strings.TrimSpace(opts.DCGMExporterBinary), toolInstallSpec{
-			Name:           "dcgm-exporter",
-			LookupNames:    []string{"dcgm-exporter"},
-			APTPackages:    [][]string{{"dcgm-exporter"}, {"nvidia-dcgm-exporter"}},
-			DNFPackages:    [][]string{{"dcgm-exporter"}, {"nvidia-dcgm-exporter"}},
-			YUMPackages:    [][]string{{"dcgm-exporter"}, {"nvidia-dcgm-exporter"}},
-			ZypperPackages: [][]string{{"dcgm-exporter"}},
-			FallbackCommands: [][]string{
-				{"go", "install", "github.com/NVIDIA/dcgm-exporter/cmd/dcgm-exporter@latest"},
-			},
-			PrivilegedFallbackCommands: [][]string{
-				{"apt-get", "install", "-y", "golang-go", "git"},
-				{"sh", "-lc", "rm -rf /tmp/InferLean-dcgm-exporter-src && git clone --depth 1 --branch 3.1.8-3.1.5 https://github.com/NVIDIA/dcgm-exporter.git /tmp/InferLean-dcgm-exporter-src && cd /tmp/InferLean-dcgm-exporter-src && go build -o /usr/local/bin/dcgm-exporter ./cmd/dcgm-exporter"},
-			},
-		})
+		runtimeBefore := findDCGMRuntimeLibrary()
+		runtimePath := runtimeBefore
+		if runtimePath == "" {
+			collectionOutputs["dcgm_runtime_install"] = "attempting install"
+			installedRuntimePath, installErr := ensureDCGMRuntime(ctx)
+			if installErr != nil {
+				collectionOutputs["dcgm_runtime_install"] = "failed"
+				setDCGMWarning(fmt.Sprintf("dcgm runtime install failed; continuing without DCGM metrics: %v", installErr))
+			} else {
+				runtimePath = installedRuntimePath
+				collectionOutputs["dcgm_runtime_install"] = "installed"
+				collectionOutputs["dcgm_runtime_library"] = runtimePath
+				_, _ = runPrivilegedCommandCapture(ctx, 60, "ldconfig")
+			}
+		} else {
+			collectionOutputs["dcgm_runtime_install"] = "present"
+			collectionOutputs["dcgm_runtime_library"] = runtimePath
+		}
+
+		dcgmBinary, err := resolveOrInstallTool(ctx, strings.TrimSpace(opts.DCGMExporterBinary), dcgmExporterInstallSpec())
 		if err != nil {
 			collectionOutputs["dcgm_exporter_binary"] = "not available"
 			setDCGMWarning(fmt.Sprintf("dcgm exporter unavailable; continuing without DCGM metrics: %v", err))
@@ -252,16 +258,38 @@ func collectPrometheusMetrics(ctx context.Context, opts PrometheusCollectionOpti
 				setDCGMWarning(fmt.Sprintf("dcgm exporter metrics file unavailable; continuing without DCGM metrics: %v", err))
 			} else {
 				debugf("prometheus collection: starting dcgm_exporter with csv=%s", dcgmMetricsCSVPath)
-				proc, err := startProcess(processCtx, workDir, "dcgm_exporter", dcgmBinary, "-f", dcgmMetricsCSVPath)
-				if err != nil {
-					setDCGMWarning(fmt.Sprintf("dcgm exporter failed to start; continuing without DCGM metrics: %v", err))
-				} else {
+				proc, waitErr := startAndWaitForDCGMExporter(processCtx, ctx, workDir, dcgmBinary, dcgmMetricsCSVPath, dcgmURL)
+				if waitErr == nil {
 					started = append(started, proc)
-					if err := waitForEndpoint(ctx, dcgmURL, 60*time.Second, proc); err != nil {
-						setDCGMWarning(fmt.Sprintf("dcgm exporter did not become ready; continuing without DCGM metrics: %v", err))
+					collectDCGMMetrics = true
+					collectionOutputs["dcgm_exporter_start"] = "started by InferLean"
+				} else {
+					if isMissingDCGMRuntimeError(waitErr) && collectionOutputs["dcgm_runtime_install"] != "installed" {
+						collectionOutputs["dcgm_runtime_install"] = "attempting install"
+						installedRuntimePath, installErr := ensureDCGMRuntime(ctx)
+						if installErr == nil {
+							runtimePath = installedRuntimePath
+							collectionOutputs["dcgm_runtime_install"] = "installed"
+							collectionOutputs["dcgm_runtime_library"] = runtimePath
+							_, _ = runPrivilegedCommandCapture(ctx, 60, "ldconfig")
+						}
+					}
+					collectionOutputs["dcgm_exporter_repair"] = "attempting rebuild"
+					repairedBinary, repairErr := repairDCGMExporterBinary(ctx)
+					if repairErr != nil {
+						collectionOutputs["dcgm_exporter_repair"] = "failed"
+						setDCGMWarning(fmt.Sprintf("dcgm exporter did not become ready; continuing without DCGM metrics: %v", waitErr))
 					} else {
-						collectDCGMMetrics = true
-						collectionOutputs["dcgm_exporter_start"] = "started by InferLean"
+						collectionOutputs["dcgm_exporter_repair"] = "rebuilt"
+						collectionOutputs["dcgm_exporter_binary"] = repairedBinary
+						retryProc, retryErr := startAndWaitForDCGMExporter(processCtx, ctx, workDir, repairedBinary, dcgmMetricsCSVPath, dcgmURL)
+						if retryErr != nil {
+							setDCGMWarning(fmt.Sprintf("dcgm exporter still failed after rebuild; continuing without DCGM metrics: %v", retryErr))
+						} else {
+							started = append(started, retryProc)
+							collectDCGMMetrics = true
+							collectionOutputs["dcgm_exporter_start"] = "started by InferLean"
+						}
 					}
 				}
 			}
@@ -319,6 +347,22 @@ func collectPrometheusMetrics(ctx context.Context, opts PrometheusCollectionOpti
 		}()
 	}
 
+	var fallbackWG sync.WaitGroup
+	var fallbackSamples map[int64]map[string]float64
+	var fallbackWarning string
+	if !collectDCGMMetrics {
+		fallbackWG.Add(1)
+		go func() {
+			defer fallbackWG.Done()
+			samples, err := sampleNvidiaSMIFallback(ctx, duration, step)
+			if err != nil {
+				fallbackWarning = err.Error()
+				return
+			}
+			fallbackSamples = samples
+		}()
+	}
+
 	start := time.Now().UTC()
 	samplingInterrupted := false
 	debugf("prometheus collection: sampling started at %s for %s", start.Format(time.RFC3339), duration)
@@ -366,6 +410,12 @@ samplingLoop:
 		debugf("prometheus collection: sampling interrupted by context cancellation")
 	}
 	debugf("prometheus collection: sampling ended at %s", end.Format(time.RFC3339))
+	fallbackWG.Wait()
+	if fallbackWarning != "" {
+		collectionOutputs["gpu_fallback_warning"] = fallbackWarning
+	} else if len(fallbackSamples) > 0 {
+		collectionOutputs["gpu_fallback"] = "sampled via nvidia-smi"
+	}
 
 	queryCtx := ctx
 	if samplingInterrupted {
@@ -479,6 +529,17 @@ samplingLoop:
 				collectedQueries++
 				debugf("prometheus collection: collected %d dcgm_exporter metric series", len(dcgmSeries))
 			}
+		}
+	}
+	for ts, metrics := range fallbackSamples {
+		if _, ok := points[ts]; !ok {
+			points[ts] = map[string]float64{}
+		}
+		for metricName, value := range metrics {
+			if _, exists := points[ts][metricName]; exists {
+				continue
+			}
+			points[ts][metricName] = value
 		}
 	}
 
@@ -645,6 +706,150 @@ func resolveDCGMMetricsCSVPath(workDir string) (string, error) {
 	return path, nil
 }
 
+func startAndWaitForDCGMExporter(processCtx, waitCtx context.Context, workDir, dcgmBinary, dcgmMetricsCSVPath, dcgmURL string) (*managedProcess, error) {
+	proc, err := startProcess(processCtx, workDir, "dcgm_exporter", dcgmBinary, "-f", dcgmMetricsCSVPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := waitForEndpoint(waitCtx, dcgmURL, 60*time.Second, proc); err != nil {
+		return proc, err
+	}
+	return proc, nil
+}
+
+func dcgmExporterInstallSpec() toolInstallSpec {
+	return toolInstallSpec{
+		Name:           "dcgm-exporter",
+		LookupNames:    []string{"dcgm-exporter"},
+		APTPackages:    [][]string{{"dcgm-exporter"}, {"nvidia-dcgm-exporter"}},
+		DNFPackages:    [][]string{{"dcgm-exporter"}, {"nvidia-dcgm-exporter"}},
+		YUMPackages:    [][]string{{"dcgm-exporter"}, {"nvidia-dcgm-exporter"}},
+		ZypperPackages: [][]string{{"dcgm-exporter"}},
+		FallbackCommands: [][]string{
+			{"go", "install", "github.com/NVIDIA/dcgm-exporter/cmd/dcgm-exporter@latest"},
+		},
+		PrivilegedFallbackCommands: [][]string{
+			{"apt-get", "install", "-y", "golang-go", "git"},
+			{"sh", "-lc", "rm -rf /tmp/InferLean-dcgm-exporter-src && git clone --depth 1 --branch 3.1.8-3.1.5 https://github.com/NVIDIA/dcgm-exporter.git /tmp/InferLean-dcgm-exporter-src && cd /tmp/InferLean-dcgm-exporter-src && go build -o /usr/local/bin/dcgm-exporter ./cmd/dcgm-exporter"},
+		},
+	}
+}
+
+func repairDCGMExporterBinary(ctx context.Context) (string, error) {
+	runtimeVersion, _ := discoverDCGMRuntimeVersion(ctx)
+	if tag, err := latestDCGMExporterTagForRuntime(ctx, runtimeVersion); err == nil && strings.TrimSpace(tag) != "" {
+		command := fmt.Sprintf("rm -rf /tmp/InferLean-dcgm-exporter-src && git clone --depth 1 --branch %s https://github.com/NVIDIA/dcgm-exporter.git /tmp/InferLean-dcgm-exporter-src && cd /tmp/InferLean-dcgm-exporter-src && go build -o /usr/local/bin/dcgm-exporter ./cmd/dcgm-exporter", shellQuote(tag))
+		if _, err := runPrivilegedCommandCapture(ctx, 8*60, "sh", "-lc", command); err == nil {
+			return resolveOrInstallTool(ctx, "", dcgmExporterInstallSpec())
+		}
+	}
+	if _, err := runPrivilegedCommandCapture(ctx, 8*60, "sh", "-lc", "export GOBIN=/usr/local/bin; go install github.com/NVIDIA/dcgm-exporter/cmd/dcgm-exporter@latest"); err != nil {
+		return "", err
+	}
+	return resolveOrInstallTool(ctx, "", dcgmExporterInstallSpec())
+}
+
+func discoverDCGMRuntimeVersion(ctx context.Context) (string, error) {
+	output, err := runCommandCapture(ctx, 60, "dcgmi", "--version")
+	if err != nil {
+		return "", err
+	}
+	return extractSemanticVersion(output)
+}
+
+func latestDCGMExporterTagForRuntime(ctx context.Context, runtimeVersion string) (string, error) {
+	runtimeVersion = strings.TrimSpace(runtimeVersion)
+	if runtimeVersion == "" {
+		return "", errors.New("empty dcgm runtime version")
+	}
+	output, err := runCommandCapture(ctx, 60, "git", "ls-remote", "--tags", "https://github.com/NVIDIA/dcgm-exporter.git")
+	if err != nil {
+		return "", err
+	}
+	return latestDCGMExporterTagForRuntimeFromOutput(output, runtimeVersion)
+}
+
+func latestDCGMExporterTagForRuntimeFromOutput(output, runtimeVersion string) (string, error) {
+	runtimeVersion = strings.TrimSpace(runtimeVersion)
+	if runtimeVersion == "" {
+		return "", errors.New("empty dcgm runtime version")
+	}
+	bestTag := ""
+	bestExporterVersion := ""
+	prefix := runtimeVersion + "-"
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 {
+			continue
+		}
+		ref := strings.TrimSpace(fields[1])
+		if !strings.HasPrefix(ref, "refs/tags/") || strings.HasSuffix(ref, "^{}") {
+			continue
+		}
+		tag := strings.TrimPrefix(ref, "refs/tags/")
+		if !strings.HasPrefix(tag, prefix) {
+			continue
+		}
+		exporterVersion := strings.TrimPrefix(tag, prefix)
+		if bestTag == "" || compareVersionLike(exporterVersion, bestExporterVersion) > 0 {
+			bestTag = tag
+			bestExporterVersion = exporterVersion
+		}
+	}
+	if bestTag == "" {
+		return "", fmt.Errorf("no dcgm-exporter tag found for runtime %s", runtimeVersion)
+	}
+	return bestTag, nil
+}
+
+func extractSemanticVersion(text string) (string, error) {
+	version := versionPattern.FindString(strings.TrimSpace(text))
+	if version == "" {
+		return "", fmt.Errorf("no semantic version found in %q", debugSnippet(text, 200))
+	}
+	return strings.TrimSpace(strings.TrimPrefix(version, "v")), nil
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func findDCGMRuntimeLibrary() string {
+	return firstExistingBinary([]string{
+		"/usr/lib/x86_64-linux-gnu/libdcgm.so*",
+		"/usr/lib64/libdcgm.so*",
+		"/usr/lib/libdcgm.so*",
+		"/usr/local/lib64/libdcgm.so*",
+		"/usr/local/lib/libdcgm.so*",
+	})
+}
+
+func ensureDCGMRuntime(ctx context.Context) (string, error) {
+	return resolveOrInstallTool(ctx, "", toolInstallSpec{
+		Name: "dcgm runtime",
+		LookupNames: []string{
+			"/usr/lib/x86_64-linux-gnu/libdcgm.so*",
+			"/usr/lib64/libdcgm.so*",
+			"/usr/lib/libdcgm.so*",
+			"/usr/local/lib64/libdcgm.so*",
+			"/usr/local/lib/libdcgm.so*",
+		},
+		APTPackages:    [][]string{{"datacenter-gpu-manager"}, {"nvidia-dcgm"}},
+		DNFPackages:    [][]string{{"datacenter-gpu-manager"}, {"nvidia-dcgm"}},
+		YUMPackages:    [][]string{{"datacenter-gpu-manager"}, {"nvidia-dcgm"}},
+		ZypperPackages: [][]string{{"datacenter-gpu-manager"}, {"nvidia-dcgm"}},
+		PacmanPackages: [][]string{{"datacenter-gpu-manager"}},
+	})
+}
+
+func isMissingDCGMRuntimeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "libdcgm") && (strings.Contains(lower, "not found") || strings.Contains(lower, "no such file"))
+}
+
 func startProcess(ctx context.Context, workDir, name, binary string, args ...string) (*managedProcess, error) {
 	logPath := filepath.Join(workDir, name+".log")
 	logFile, err := os.Create(logPath)
@@ -670,6 +875,91 @@ func startProcess(ctx context.Context, workDir, name, binary string, args ...str
 		close(proc.done)
 	}()
 	return proc, nil
+}
+
+func sampleNvidiaSMIFallback(ctx context.Context, duration, step time.Duration) (map[int64]map[string]float64, error) {
+	path, err := exec.LookPath("nvidia-smi")
+	if err != nil {
+		return nil, fmt.Errorf("nvidia-smi unavailable: %w", err)
+	}
+	if step <= 0 {
+		step = 15 * time.Second
+	}
+	sampleCount := int(math.Ceil(duration.Seconds()/step.Seconds())) + 1
+	if sampleCount < 2 {
+		sampleCount = 2
+	}
+	out := map[int64]map[string]float64{}
+	for i := 0; i < sampleCount; i++ {
+		ts := time.Now().UTC().UnixMilli()
+		metrics, err := collectNvidiaSMISample(ctx, path)
+		if err == nil && len(metrics) > 0 {
+			out[ts] = metrics
+		}
+		if i == sampleCount-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return out, ctx.Err()
+		case <-time.After(step):
+		}
+	}
+	if len(out) == 0 {
+		return nil, errors.New("nvidia-smi fallback produced no samples")
+	}
+	return out, nil
+}
+
+func collectNvidiaSMISample(ctx context.Context, binary string) (map[string]float64, error) {
+	cmd := exec.CommandContext(ctx, binary,
+		"--query-gpu=utilization.gpu,memory.used,memory.total",
+		"--format=csv,noheader,nounits",
+	)
+	data, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) == "" {
+		return nil, errors.New("empty nvidia-smi output")
+	}
+	utilSum := 0.0
+	usedBytes := 0.0
+	totalBytes := 0.0
+	gpuCount := 0.0
+	for _, line := range lines {
+		fields := strings.Split(line, ",")
+		if len(fields) < 3 {
+			continue
+		}
+		util, okUtil := parseNvidiaSMINumber(fields[0])
+		usedMiB, okUsed := parseNvidiaSMINumber(fields[1])
+		totalMiB, okTotal := parseNvidiaSMINumber(fields[2])
+		if !okUtil || !okUsed || !okTotal || totalMiB <= 0 {
+			continue
+		}
+		utilSum += util
+		usedBytes += usedMiB * 1024 * 1024
+		totalBytes += totalMiB * 1024 * 1024
+		gpuCount++
+	}
+	if gpuCount == 0 || totalBytes <= 0 {
+		return nil, errors.New("nvidia-smi output did not contain GPU rows")
+	}
+	return map[string]float64{
+		"gpu_utilization_pct": utilSum / gpuCount,
+		"gpu_fb_used_bytes":   usedBytes,
+		"gpu_fb_free_bytes":   totalBytes - usedBytes,
+	}, nil
+}
+
+func parseNvidiaSMINumber(raw string) (float64, bool) {
+	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil {
+		return 0, false
+	}
+	return value, true
 }
 
 func (p *managedProcess) stop() {

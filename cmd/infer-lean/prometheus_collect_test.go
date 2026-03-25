@@ -161,3 +161,37 @@ func TestQueryPrometheusLabeledMetricRangePreservesSeriesLabels(t *testing.T) {
 		t.Fatalf("expected %s at ts1 to be 40, got %v", keyCPU1, got)
 	}
 }
+
+func TestIsMissingDCGMRuntimeError(t *testing.T) {
+	if !isMissingDCGMRuntimeError(fmt.Errorf("dcgm_exporter exited: libdcgm.so not Found")) {
+		t.Fatalf("expected libdcgm startup failure to be classified as missing runtime")
+	}
+	if isMissingDCGMRuntimeError(fmt.Errorf("timeout waiting for endpoint")) {
+		t.Fatalf("expected unrelated failure to stay unclassified")
+	}
+}
+
+func TestLatestDCGMExporterTagForRuntimeFromOutput(t *testing.T) {
+	output := `
+402a10fd8bb4a36be7cc5b2c703cf8f1322d1ef0	refs/tags/3.3.8-3.6.0
+b97b7633e3f39f7a537bd77561cc0ec0c2dca3f5	refs/tags/3.3.9-3.6.1
+5f9250c211a011dd46028bde83e1c4a625c46402	refs/tags/4.0.0-4.0.1
+`
+	got, err := latestDCGMExporterTagForRuntimeFromOutput(output, "3.3.9")
+	if err != nil {
+		t.Fatalf("expected matching tag, got error: %v", err)
+	}
+	if got != "3.3.9-3.6.1" {
+		t.Fatalf("expected 3.3.9-3.6.1, got %q", got)
+	}
+}
+
+func TestExtractSemanticVersion(t *testing.T) {
+	got, err := extractSemanticVersion("dcgmi  version: 3.3.9")
+	if err != nil {
+		t.Fatalf("expected version parse to succeed: %v", err)
+	}
+	if got != "3.3.9" {
+		t.Fatalf("expected 3.3.9, got %q", got)
+	}
+}

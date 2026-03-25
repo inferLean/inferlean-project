@@ -38,11 +38,20 @@ func loadMetrics(path string) (metricsSnapshot, []string, error) {
 	if v, ok := coerceInt(raw["gpu_memory_mb"]); ok {
 		snapshot.GPUMemoryMB = v
 	}
+	if embeddedOSInfo, ok := parseEmbeddedOSInformation(raw["os_information"]); ok {
+		snapshot.EmbeddedOSInformation = embeddedOSInfo
+	}
+	if embeddedGPUInfo, ok := parseEmbeddedGPUInformation(raw["gpu_information"]); ok {
+		snapshot.EmbeddedGPUInformation = embeddedGPUInfo
+	}
 	if embeddedConfig, ok := raw["current_vllm_configurations"].(map[string]any); ok {
 		snapshot.EmbeddedConfig = embeddedConfig
 	}
 	if workloadProfile, ok := parseEmbeddedWorkloadProfile(raw["workload_profile"]); ok {
 		snapshot.EmbeddedWorkload = workloadProfile
+	}
+	if warnings := parseWarnings(raw["warnings"]); len(warnings) > 0 {
+		snapshot.EmbeddedWarnings = warnings
 	}
 	if rawLogs, ok := raw["metric_collection_outputs"].(map[string]any); ok {
 		snapshot.MetricCollectionLogs = map[string]string{}
@@ -56,6 +65,66 @@ func loadMetrics(path string) (metricsSnapshot, []string, error) {
 	snapshot.GPUUtilizationSamples = normalizeSamples(asFloatSlice(raw["gpu_utilization_samples"]))
 	snapshot.CollectedMetrics = parseCollectedMetrics(raw)
 	return snapshot, nil, nil
+}
+
+func parseEmbeddedOSInformation(raw any) (*model.OSInformation, bool) {
+	if raw == nil {
+		return nil, false
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil, false
+	}
+	var info model.OSInformation
+	if err := json.Unmarshal(data, &info); err != nil {
+		return nil, false
+	}
+	if strings.TrimSpace(info.OSType) == "" &&
+		strings.TrimSpace(info.Architecture) == "" &&
+		strings.TrimSpace(info.OSVersion) == "" &&
+		strings.TrimSpace(info.Distribution) == "" &&
+		info.MemorySizeBytes == 0 &&
+		info.DiskSizeBytes == 0 &&
+		info.AverageCPUUtilizationPct == 0 {
+		return nil, false
+	}
+	return &info, true
+}
+
+func parseEmbeddedGPUInformation(raw any) (*model.GPUInformation, bool) {
+	if raw == nil {
+		return nil, false
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil, false
+	}
+	var info model.GPUInformation
+	if err := json.Unmarshal(data, &info); err != nil {
+		return nil, false
+	}
+	if strings.TrimSpace(info.GPUModel) == "" &&
+		strings.TrimSpace(info.Company) == "" &&
+		info.VRAMSizeBytes == 0 &&
+		info.UtilizationPct == 0 {
+		return nil, false
+	}
+	return &info, true
+}
+
+func parseWarnings(raw any) []string {
+	items, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		text := strings.TrimSpace(fmt.Sprint(item))
+		if text != "" {
+			out = append(out, text)
+		}
+	}
+	return out
 }
 
 func parseAdvancedProfiling(raw any) *model.AdvancedProfilingInfo {

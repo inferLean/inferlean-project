@@ -83,6 +83,7 @@ func (a *Analyzer) Analyze(ctx context.Context, opts Options) (*model.AnalysisRe
 		report.CollectedMetrics = metrics.CollectedMetrics
 		report.MetricCollectionOutputs = metrics.MetricCollectionLogs
 		report.AdvancedProfiling = metrics.AdvancedProfiling
+		report.Warnings = append(report.Warnings, metrics.EmbeddedWarnings...)
 		if report.WorkloadProfile == nil && metrics.EmbeddedWorkload != nil {
 			report.WorkloadProfile = metrics.EmbeddedWorkload
 		}
@@ -109,6 +110,12 @@ func (a *Analyzer) Analyze(ctx context.Context, opts Options) (*model.AnalysisRe
 	}
 	if report.GPUInformation.UtilizationPct == 0 && len(metrics.GPUUtilizationSamples) > 0 {
 		report.GPUInformation.UtilizationPct = mean(metrics.GPUUtilizationSamples)
+	}
+	if metrics.EmbeddedOSInformation != nil {
+		report.OSInformation = mergeOSInformation(report.OSInformation, *metrics.EmbeddedOSInformation)
+	}
+	if metrics.EmbeddedGPUInformation != nil {
+		report.GPUInformation = mergeGPUInformation(report.GPUInformation, *metrics.EmbeddedGPUInformation)
 	}
 
 	if report.CollectedMetrics == nil {
@@ -214,4 +221,60 @@ func mergeConfigMaps(maps ...map[string]any) map[string]any {
 		return nil
 	}
 	return merged
+}
+
+func mergeOSInformation(base, override model.OSInformation) model.OSInformation {
+	if strings.TrimSpace(override.OSType) != "" {
+		base.OSType = override.OSType
+	}
+	if strings.TrimSpace(override.Architecture) != "" {
+		base.Architecture = override.Architecture
+	}
+	if strings.TrimSpace(override.OSVersion) != "" {
+		base.OSVersion = override.OSVersion
+	}
+	if strings.TrimSpace(override.Distribution) != "" {
+		base.Distribution = override.Distribution
+	}
+	if override.DiskSizeBytes > 0 {
+		base.DiskSizeBytes = override.DiskSizeBytes
+	}
+	if override.MemorySizeBytes > 0 {
+		base.MemorySizeBytes = override.MemorySizeBytes
+	}
+	if override.AvailableDiskBytes > 0 {
+		base.AvailableDiskBytes = override.AvailableDiskBytes
+	}
+	if override.AvailableMemoryBytes > 0 {
+		base.AvailableMemoryBytes = override.AvailableMemoryBytes
+	}
+	if override.AverageCPUUtilizationPct > 0 {
+		base.AverageCPUUtilizationPct = override.AverageCPUUtilizationPct
+	}
+	if strings.TrimSpace(override.CPU.Model) != "" {
+		base.CPU.Model = override.CPU.Model
+	}
+	if override.CPU.PhysicalCores > 0 {
+		base.CPU.PhysicalCores = override.CPU.PhysicalCores
+	}
+	if override.CPU.LogicalCores > 0 {
+		base.CPU.LogicalCores = override.CPU.LogicalCores
+	}
+	return base
+}
+
+func mergeGPUInformation(base, override model.GPUInformation) model.GPUInformation {
+	if strings.TrimSpace(override.GPUModel) != "" {
+		base.GPUModel = override.GPUModel
+	}
+	if strings.TrimSpace(override.Company) != "" {
+		base.Company = override.Company
+	}
+	if override.VRAMSizeBytes > 0 {
+		base.VRAMSizeBytes = override.VRAMSizeBytes
+	}
+	if override.UtilizationPct > 0 {
+		base.UtilizationPct = override.UtilizationPct
+	}
+	return base
 }

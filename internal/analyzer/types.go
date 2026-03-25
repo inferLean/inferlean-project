@@ -26,6 +26,10 @@ type Probe interface {
 
 type defaultProbe struct{}
 
+func CollectEnvironment(ctx context.Context) (model.OSInformation, model.GPUInformation, []string) {
+	return defaultProbe{}.Collect(ctx)
+}
+
 type configSnapshot struct {
 	Path   string
 	Format string
@@ -34,18 +38,21 @@ type configSnapshot struct {
 }
 
 type metricsSnapshot struct {
-	Path                  string
-	Format                string
-	DeploymentType        string
-	VLLMVersion           string
-	GPUName               string
-	GPUMemoryMB           int
-	EmbeddedConfig        map[string]any
-	EmbeddedWorkload      *model.WorkloadProfile
-	MetricCollectionLogs  map[string]string
-	AdvancedProfiling     *model.AdvancedProfilingInfo
-	GPUUtilizationSamples []float64
-	CollectedMetrics      []model.CollectedMetricPoint
+	Path                   string
+	Format                 string
+	DeploymentType         string
+	VLLMVersion            string
+	GPUName                string
+	GPUMemoryMB            int
+	EmbeddedOSInformation  *model.OSInformation
+	EmbeddedGPUInformation *model.GPUInformation
+	EmbeddedConfig         map[string]any
+	EmbeddedWorkload       *model.WorkloadProfile
+	EmbeddedWarnings       []string
+	MetricCollectionLogs   map[string]string
+	AdvancedProfiling      *model.AdvancedProfilingInfo
+	GPUUtilizationSamples  []float64
+	CollectedMetrics       []model.CollectedMetricPoint
 }
 
 type workloadProfileSnapshot struct {
