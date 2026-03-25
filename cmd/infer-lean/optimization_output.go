@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/inferLean/inferlean-project/internal/model"
+	model "github.com/inferLean/inferlean-project/cli/contracts"
 )
 
 func renderAnalysisV2Summary(w io.Writer, report *model.AnalysisReportV2) {

@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/inferLean/inferlean-project/internal/analyzer"
-	"github.com/inferLean/inferlean-project/internal/model"
+	"github.com/inferLean/inferlean-project/analyzer"
+	model "github.com/inferLean/inferlean-project/cli/contracts"
 )
 
 var errHelpRequested = errors.New("help requested")

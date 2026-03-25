@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/inferLean/inferlean-project/internal/analyzer"
-	"github.com/inferLean/inferlean-project/internal/model"
+	"github.com/inferLean/inferlean-project/analyzer"
+	model "github.com/inferLean/inferlean-project/cli/contracts"
 )
 
 func runIntent(args []string, stdout, stderr io.Writer) error {

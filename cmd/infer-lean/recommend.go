@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/inferLean/inferlean-project/internal/analyzer"
-	"github.com/inferLean/inferlean-project/internal/model"
-	"github.com/inferLean/inferlean-project/internal/optimization"
-	"github.com/inferLean/inferlean-project/internal/recommender"
+	"github.com/inferLean/inferlean-project/analyzer"
+	model "github.com/inferLean/inferlean-project/cli/contracts"
+	"github.com/inferLean/inferlean-project/optimization"
+	"github.com/inferLean/inferlean-project/recommender"
 )
 
 type setFlags map[string]float64

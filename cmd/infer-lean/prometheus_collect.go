@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/inferLean/inferlean-project/internal/model"
+	model "github.com/inferLean/inferlean-project/cli/contracts"
 )
 
 type PrometheusCollectionOptions struct {

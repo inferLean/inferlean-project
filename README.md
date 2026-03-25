@@ -104,4 +104,3 @@ That makes it easy for users to try InferLean without setting up a full local ob
 ## Learn More
 
 - [inferlean.com](https://inferlean.com)
-- [Project repository](https://github.com/inferLean/inferlean-project)

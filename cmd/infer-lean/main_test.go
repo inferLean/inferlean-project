@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/inferLean/inferlean-project/internal/model"
+	model "github.com/inferLean/inferlean-project/cli/contracts"
 )
 
 func TestCollectWritesAbsoluteCollectorReport(t *testing.T) {

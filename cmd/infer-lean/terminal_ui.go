@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/inferLean/inferlean-project/internal/analyzer"
-	"github.com/inferLean/inferlean-project/internal/model"
+	"github.com/inferLean/inferlean-project/analyzer"
+	model "github.com/inferLean/inferlean-project/cli/contracts"
 )
 
 const (
